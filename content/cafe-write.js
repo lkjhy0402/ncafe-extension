@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.4)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.5)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.4 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.5 loaded on", location.hostname, "top=" + isTop);
 
   const STORAGE_KEY = "ncafe_pending_auto_fill";
   const MAX_AGE_MS = 5 * 60 * 1000;
@@ -178,6 +178,23 @@
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }
+  // React가 관리하는 input/textarea의 value를 framework state까지 갱신되도록 설정
+  function setReactValue(el, value) {
+    try {
+      const proto = el.tagName === "TEXTAREA"
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      if (setter) {
+        setter.call(el, value);
+      } else {
+        el.value = value;
+      }
+    } catch {
+      el.value = value;
+    }
+    fireInput(el);
+  }
   function fillTitle(doc, title) {
     const sels = [
       'input[name="subject"]',
@@ -192,8 +209,7 @@
       if (el && el.tagName === "INPUT" && (el.offsetParent !== null || el.getClientRects().length > 0)) {
         try {
           el.focus();
-          el.value = title;
-          fireInput(el);
+          setReactValue(el, title);
           return true;
         } catch { /* try next */ }
       }
@@ -226,12 +242,55 @@
     if (ta) {
       try {
         ta.focus();
-        ta.value = body;
-        fireInput(ta);
+        setReactValue(ta, body);
         return true;
       } catch { /* fallthrough */ }
     }
     return false;
+  }
+
+  // ─── 공개 설정 자동화 ─────────────────────────────────────────────
+  // 멤버공개 라디오 클릭 + 검색·네이버 서비스 공개 체크 해제
+  function findInputByLabel(doc, type, labelText) {
+    const target = labelText.replace(/\s/g, "");
+    const labels = doc.querySelectorAll("label");
+    for (const label of labels) {
+      const text = (label.textContent || "").replace(/\s/g, "");
+      if (!text.includes(target)) continue;
+      // (a) input이 label 내부
+      const inner = label.querySelector(`input[type="${type}"]`);
+      if (inner) return inner;
+      // (b) label[for=ID]로 외부 input 참조
+      const forId = label.getAttribute("for");
+      if (forId) {
+        const ext = doc.getElementById(forId);
+        if (ext && ext.type === type) return ext;
+      }
+    }
+    return null;
+  }
+  function applyPrivacySettings(doc) {
+    let memberOk = false;
+    let searchOk = false;
+    try {
+      const memberRadio = findInputByLabel(doc, "radio", "멤버공개");
+      if (memberRadio && !memberRadio.checked) {
+        memberRadio.click();
+      }
+      memberOk = !!memberRadio;
+    } catch (e) {
+      console.error("[NCAFE cafe-write] 멤버공개 설정 실패", e);
+    }
+    try {
+      const searchCheckbox = findInputByLabel(doc, "checkbox", "검색");
+      if (searchCheckbox && searchCheckbox.checked) {
+        searchCheckbox.click();
+      }
+      searchOk = !!searchCheckbox;
+    } catch (e) {
+      console.error("[NCAFE cafe-write] 검색공개 해제 실패", e);
+    }
+    return { memberOk, searchOk };
   }
   function escapeHtml(s) {
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
@@ -240,18 +299,25 @@
   function tryFill(data) {
     let titleOk = fillTitle(document, data.title);
     let bodyOk = fillBody(document, data.body);
-    if (!titleOk || !bodyOk) {
+    let privacy = applyPrivacySettings(document);
+    if (!titleOk || !bodyOk || !privacy.memberOk || !privacy.searchOk) {
       for (const iframe of document.querySelectorAll("iframe")) {
         try {
           const doc = iframe.contentDocument;
           if (!doc) continue;
           if (!titleOk) titleOk = fillTitle(doc, data.title);
           if (!bodyOk) bodyOk = fillBody(doc, data.body);
-          if (titleOk && bodyOk) break;
+          if (!privacy.memberOk || !privacy.searchOk) {
+            const p = applyPrivacySettings(doc);
+            privacy.memberOk = privacy.memberOk || p.memberOk;
+            privacy.searchOk = privacy.searchOk || p.searchOk;
+          }
+          if (titleOk && bodyOk && privacy.memberOk && privacy.searchOk) break;
         } catch { /* cross-origin */ }
       }
     }
-    return { titleOk, bodyOk };
+    console.log("[NCAFE cafe-write] fill result:", { titleOk, bodyOk, ...privacy });
+    return { titleOk, bodyOk, privacy };
   }
 
   // ─── 메인 흐름 ────────────────────────────────────────────────────
@@ -367,13 +433,28 @@
         return;
       }
 
-      const { titleOk, bodyOk } = tryFill(data);
+      // 1차 시도
+      let { titleOk, bodyOk, privacy } = tryFill(data);
+
+      // React 재렌더로 값이 날아가는 경우 대비 — 0.8초 후 재시도
+      setTimeout(() => {
+        if (!titleOk || !bodyOk || !privacy.memberOk || !privacy.searchOk) {
+          const r2 = tryFill(data);
+          if (!titleOk && r2.titleOk) titleOk = true;
+          if (!bodyOk && r2.bodyOk) bodyOk = true;
+          if (!privacy.memberOk && r2.privacy.memberOk) privacy.memberOk = true;
+          if (!privacy.searchOk && r2.privacy.searchOk) privacy.searchOk = true;
+        }
+      }, 800);
+
+      // 토스트는 1차 결과 기준으로 즉시 표시
       if (titleOk && bodyOk) {
         const verified = writeNick === expected;
         showNotice(
           `✅ 자동 입력 완료\n` +
           `페르소나: ${data.expectedPersona?.displayName} (${expected})\n` +
           (verified ? `카페 닉네임 검증 ✓\n` : `(닉네임 자동 검증 불가 — 본인 확인 필요)\n`) +
+          `공개 설정: ${privacy.memberOk ? "멤버공개 ✓" : "멤버공개 ✗"} / ${privacy.searchOk ? "검색공개 처리 ✓" : "검색공개 처리 ✗"}\n` +
           `검토 후 [임시저장] 또는 [등록] 클릭하세요.`,
           "ok"
         );
