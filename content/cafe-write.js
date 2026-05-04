@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.6)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.7)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.6 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.7 loaded on", location.hostname, "top=" + isTop);
 
   const STORAGE_KEY = "ncafe_pending_auto_fill";
   const MAX_AGE_MS = 5 * 60 * 1000;
@@ -229,39 +229,67 @@
     console.log("[NCAFE cafe-write] no matching title input found");
     return false;
   }
+  // 본문 → SmartEditor 단락 구조로 변환
+  // \n\n+ 단위로 단락 분리, 각 단락 사이에 빈 <p> 삽입해 시각적 간격 확보
+  function buildParagraphHtml(body, smartEditorClasses) {
+    const paragraphs = body.split(/\n\s*\n+/).filter((p) => p.trim());
+    const cls = smartEditorClasses ? ' class="se-text-paragraph"' : "";
+    const span = smartEditorClasses
+      ? '<span class="se-ff-nanumgothic se-fs15">'
+      : "<span>";
+    const emptyP = smartEditorClasses
+      ? '<p class="se-text-paragraph"><br></p>'
+      : "<p><br></p>";
+    return paragraphs
+      .map((p) => {
+        const escaped = escapeHtml(p).replace(/\n/g, "<br>");
+        return `<p${cls}>${span}${escaped}</span></p>`;
+      })
+      .join(emptyP);
+  }
+
   function fillBody(doc, body) {
-    const seArea = doc.querySelector(".se-content");
-    if (seArea) {
-      const paragraphs = body.split(/\n\s*\n/).filter((p) => p.trim());
-      // 단락 사이 시각적 간격을 위해 빈 paragraph 삽입
-      const emptyP = `<div class="se-text-paragraph"><br></div>`;
-      const html = paragraphs
-        .map((p) =>
-          `<div class="se-text-paragraph"><span class="se-ff-nanumgothic se-fs15">${escapeHtml(p)}</span></div>`
-        )
-        .join(emptyP);
-      try {
-        seArea.innerHTML = html;
-        fireInput(seArea);
-        return true;
-      } catch { /* fallthrough */ }
-    }
-    const editable = doc.querySelector('[contenteditable="true"]');
+    // 1차: SmartEditor v3의 contenteditable 영역 (가장 안정적)
+    const editable =
+      doc.querySelector('.se-content [contenteditable="true"]') ||
+      doc.querySelector('[contenteditable="true"][role="textbox"]') ||
+      doc.querySelector('[contenteditable="true"]');
     if (editable) {
       try {
         editable.focus();
-        editable.innerHTML = escapeHtml(body).replace(/\n\n/g, "<br><br>").replace(/\n/g, "<br>");
+        // SmartEditor 영역 안이면 SmartEditor 클래스 사용
+        const isSE = !!editable.closest(".se-content");
+        editable.innerHTML = buildParagraphHtml(body, isSE);
         fireInput(editable);
+        console.log(`[NCAFE cafe-write] body via contenteditable (smartEditor=${isSE})`);
         return true;
-      } catch { /* fallthrough */ }
+      } catch (e) {
+        console.error("[NCAFE cafe-write] body editable fill error", e);
+      }
     }
+    // 2차: SmartEditor의 .se-content 직접
+    const seArea = doc.querySelector(".se-content");
+    if (seArea) {
+      try {
+        seArea.innerHTML = buildParagraphHtml(body, true);
+        fireInput(seArea);
+        console.log("[NCAFE cafe-write] body via .se-content");
+        return true;
+      } catch (e) {
+        console.error("[NCAFE cafe-write] body se-content fill error", e);
+      }
+    }
+    // 3차: 일반 textarea
     const ta = doc.querySelector("textarea");
     if (ta) {
       try {
         ta.focus();
         setReactValue(ta, body);
+        console.log("[NCAFE cafe-write] body via textarea");
         return true;
-      } catch { /* fallthrough */ }
+      } catch (e) {
+        console.error("[NCAFE cafe-write] body textarea fill error", e);
+      }
     }
     return false;
   }
