@@ -1,20 +1,20 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.1)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.2)
 //
 // 흐름:
-//   1) NCAFE 도메인: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
-//   2) 카페 게시판 페이지: 알림 + [글쓰기] 버튼 클릭 → 글쓰기 페이지로 이동 (검증 X)
-//   3) 카페 글쓰기 페이지:
-//      - 카페별 닉네임 추출 시도 (글쓰기 폼에 표시되는 카페 닉네임)
-//      - 닉네임 추출 성공 + NCAFE 등록과 일치 → 자동 입력
-//      - 닉네임 불일치 → 경고 + 자동 입력 중단 (안전)
-//      - 닉네임 추출 실패 → 경고 후 자동 입력 진행 (확인은 본인이)
+//   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
+//   2) 카페 게시판: 알림 → 글쓰기 버튼 폴링·클릭. 8초 못 찾으면 글쓰기 URL로 직접 이동
+//   3) 카페 글쓰기: 카페별 닉네임 검증 (가능 시) + 제목·본문 자동 입력
 //
-// 절대 자동 [임시저장]/[등록] 클릭 X
+// 변경 (v1.2.2):
+//   - all_frames:true 대응 (iframe 안에 있는 버튼·폼도 찾음)
+//   - 버튼/폼 폴링을 8초까지 (SPA 늦은 렌더 대응)
+//   - 글쓰기 버튼 못 찾으면 URL로 직접 이동 fallback
 
 (function () {
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
-  console.log("[NCAFE cafe-write] loaded v1.2.1 on", location.hostname);
+  const isTop = window.self === window.top;
+  console.log("[NCAFE cafe-write] v1.2.2 loaded on", location.hostname, "top=" + isTop);
 
   const STORAGE_KEY = "ncafe_pending_auto_fill";
   const MAX_AGE_MS = 5 * 60 * 1000;
@@ -22,8 +22,9 @@
   const onNCAFE = location.hostname.endsWith("vercel.app");
   const onCafe = location.hostname === "cafe.naver.com";
 
-  // ─── A. NCAFE 도메인: postMessage 수신 → storage 저장 ─────────────
+  // ─── A. NCAFE: postMessage → storage ─────────────────────────────
   if (onNCAFE) {
+    if (!isTop) return; // postMessage는 top frame에서만
     window.addEventListener("message", (event) => {
       if (event.source !== window) return;
       const msg = event.data;
@@ -33,17 +34,17 @@
         chrome.storage.local.set({
           [STORAGE_KEY]: { ...msg.data, ts: msg.data.ts || Date.now() },
         });
-        console.log("[NCAFE cafe-write] saved auto-fill data:", msg.data.cafeName);
+        console.log("[NCAFE cafe-write] saved:", msg.data.cafeName);
       } catch (e) {
-        console.error("[NCAFE cafe-write] storage save failed", e);
+        console.error("[NCAFE cafe-write] save failed", e);
       }
     });
     return;
   }
 
-  // ─── B. 카페 도메인: 검증 + 자동 입력 ────────────────────────────
   if (!onCafe) return;
 
+  // ─── 페이지 종류 ─────────────────────────────────────────────────
   const HREF = () => location.href;
   function isWritePage() {
     const u = HREF();
@@ -57,35 +58,33 @@
            /\/f-e\/cafes\/\d+\/menus\/\d+/.test(u) ||
            /\/ca-fe\/cafes\/\d+\/menus\/\d+/.test(u);
   }
+  function extractCafeId(url) {
+    const m = url.match(/\/cafes\/(\d+)/);
+    return m ? m[1] : null;
+  }
+  function extractMenuId(url) {
+    const m = url.match(/\/menus\/(\d+)/);
+    return m ? m[1] : null;
+  }
 
   // ─── 카페별 닉네임 추출 (글쓰기 페이지 전용) ──────────────────────
-  // 글쓰기 폼 근처에 노출되는 카페별 닉네임을 찾음.
-  // 다양한 카페·시점 디자인 대비 다중 셀렉터.
   const WRITE_NICK_SELECTORS = [
-    // 글쓰기 폼 영역의 닉네임 표시
     ".write_form .nick_text",
     ".article-write-form .nick",
     ".writer_info .nick",
     ".write-info .nickname",
     'input[name="memberNick"]',
     'input[name="writerNick"]',
-    // SmartEditor 헤더의 작성자 표시
     ".se-author-name",
-    // 우측 사이드 회원 정보
     ".cafe_member_nick",
     ".member_nick",
     ".my_info .nickname",
     ".profile_area .nick",
-    // 텍스트 패턴 fallback
     "[data-nickname]",
   ];
-
   function cleanNick(s) {
-    return (s || "")
-      .replace(/(님|회원|\s*\(.*?\))$/g, "")
-      .trim();
+    return (s || "").replace(/(님|회원|\s*\(.*?\))$/g, "").trim();
   }
-
   function extractNickFromDoc(doc) {
     if (!doc) return null;
     for (const sel of WRITE_NICK_SELECTORS) {
@@ -97,7 +96,6 @@
         if (cleaned) return cleaned;
       }
     }
-    // 글쓰기 폼 안에서 텍스트 패턴 검색 ("닉네임: ㅇㅇㅇ")
     const writeForm = doc.querySelector('form, .write_area, .article-write, .se-content');
     if (writeForm) {
       const text = writeForm.textContent || "";
@@ -106,7 +104,6 @@
     }
     return null;
   }
-
   function extractWriteNickname() {
     const top = extractNickFromDoc(document);
     if (top) return top;
@@ -119,8 +116,9 @@
     return null;
   }
 
-  // ─── 토스트 알림 ─────────────────────────────────────────────────
+  // ─── 토스트 (top frame에서만 보이도록) ────────────────────────────
   function showNotice(message, type, persistent) {
+    if (!isTop) return; // iframe에서는 토스트 안 띄움 (top에서 보여줌)
     try {
       if (window.NCAFE_Toast?.show) {
         window.NCAFE_Toast.show({
@@ -144,34 +142,44 @@
     setTimeout(() => el.remove(), persistent ? 30000 : 10000);
   }
 
-  // ─── 글쓰기 버튼 찾기 + 클릭 ─────────────────────────────────────
+  // ─── 글쓰기 버튼 찾기 ─────────────────────────────────────────────
   function findWriteButton() {
-    const candidates = Array.from(document.querySelectorAll(
-      'a, button, [role="button"]'
-    ));
+    // 텍스트 기반 (우선)
+    const candidates = Array.from(document.querySelectorAll('a, button, [role="button"]'));
     for (const el of candidates) {
       const text = (el.textContent || "").replace(/\s/g, "");
+      if (text === "글쓰기" || text === "✏글쓰기" || /^✏?\s*글쓰기/.test(text.replace(/\s/g, ""))) {
+        if (el.offsetParent !== null || el.getClientRects().length > 0) return el;
+      }
+    }
+    // href 기반
+    for (const el of candidates) {
       const href = el.getAttribute("href") || "";
-      if (
-        text === "글쓰기" || text.includes("글쓰기") ||
-        href.includes("ArticleWrite") || href.includes("/articles/write")
-      ) {
+      if (href.includes("ArticleWrite") || href.includes("/articles/write")) {
         return el;
       }
     }
-    // class 기반 fallback
+    // class 기반
     const classCandidates = [
       ".btn_write", ".article-write-btn", ".btn-write",
       'a[class*="write"]', 'button[class*="write"]',
     ];
     for (const sel of classCandidates) {
       const el = document.querySelector(sel);
-      if (el) return el;
+      if (el && (el.offsetParent !== null || el.getClientRects().length > 0)) return el;
     }
     return null;
   }
 
-  // ─── 폼 자동 입력 ─────────────────────────────────────────────────
+  // 직접 URL 이동 fallback (글쓰기 버튼 못 찾을 때)
+  function buildWriteUrl(boardUrl) {
+    const cafeId = extractCafeId(boardUrl);
+    const menuId = extractMenuId(boardUrl);
+    if (!cafeId || !menuId) return null;
+    return `https://cafe.naver.com/f-e/cafes/${cafeId}/articles/write?menuId=${menuId}`;
+  }
+
+  // ─── 폼 입력 ─────────────────────────────────────────────────────
   function fireInput(el) {
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -187,7 +195,7 @@
     ];
     for (const sel of sels) {
       const el = doc.querySelector(sel);
-      if (el && el.tagName === "INPUT" && el.offsetParent !== null) {
+      if (el && el.tagName === "INPUT" && (el.offsetParent !== null || el.getClientRects().length > 0)) {
         try {
           el.focus();
           el.value = title;
@@ -199,7 +207,6 @@
     return false;
   }
   function fillBody(doc, body) {
-    // SmartEditor v3
     const seArea = doc.querySelector(".se-content");
     if (seArea) {
       const paragraphs = body.split(/\n\s*\n/).filter((p) => p.trim());
@@ -212,7 +219,6 @@
         return true;
       } catch { /* fallthrough */ }
     }
-    // contenteditable
     const editable = doc.querySelector('[contenteditable="true"]');
     if (editable) {
       try {
@@ -222,7 +228,6 @@
         return true;
       } catch { /* fallthrough */ }
     }
-    // textarea
     const ta = doc.querySelector("textarea");
     if (ta) {
       try {
@@ -235,11 +240,9 @@
     return false;
   }
   function escapeHtml(s) {
-    return String(s || "")
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
-
   function tryFill(data) {
     let titleOk = fillTitle(document, data.title);
     let bodyOk = fillBody(document, data.body);
@@ -259,31 +262,103 @@
 
   // ─── 메인 흐름 ────────────────────────────────────────────────────
   let executed = false;
-  async function execute() {
-    if (executed) return;
+  let writeButtonClicked = false;
 
-    let data;
+  async function getData() {
     try {
       const stored = await chrome.storage.local.get(STORAGE_KEY);
-      data = stored[STORAGE_KEY];
+      const data = stored[STORAGE_KEY];
+      if (!data) return null;
+      if (Date.now() - (data.ts || 0) > MAX_AGE_MS) {
+        try { await chrome.storage.local.remove(STORAGE_KEY); } catch {}
+        return null;
+      }
+      return data;
     } catch {
-      return;
+      return null;
     }
-    if (!data) return;
+  }
 
-    if (Date.now() - (data.ts || 0) > MAX_AGE_MS) {
-      try { await chrome.storage.local.remove(STORAGE_KEY); } catch {}
-      return;
+  async function executeBoard(data) {
+    if (executed) return;
+    executed = true;
+    console.log("[NCAFE cafe-write] board execute, looking for 글쓰기 button…");
+
+    if (isTop) {
+      showNotice(
+        `📋 ${data.cafeName} 일상글 게시판 도착\n` +
+        `예정 페르소나: ${data.expectedPersona?.displayName} (${data.expectedNickname})\n` +
+        `잠시 후 글쓰기 페이지로 이동…`,
+        "ok"
+      );
     }
 
-    // 글쓰기 페이지 — 검증 + 입력
-    if (isWritePage()) {
+    // 0.5초 간격으로 8초까지 글쓰기 버튼 폴링
+    let elapsed = 0;
+    const interval = setInterval(() => {
+      if (writeButtonClicked) { clearInterval(interval); return; }
+      const btn = findWriteButton();
+      if (btn) {
+        writeButtonClicked = true;
+        clearInterval(interval);
+        console.log("[NCAFE cafe-write] write button found, clicking", btn);
+        try { btn.click(); } catch (e) { console.error("[NCAFE cafe-write] click failed", e); }
+        return;
+      }
+      elapsed += 500;
+      if (elapsed >= 8000) {
+        clearInterval(interval);
+        // fallback: 직접 URL 이동
+        const writeUrl = buildWriteUrl(data.cafeUrl);
+        if (writeUrl && isTop) {
+          console.log("[NCAFE cafe-write] button not found, navigating to", writeUrl);
+          showNotice(
+            `🔄 [글쓰기] 버튼 못 찾음 → 글쓰기 페이지로 직접 이동`,
+            "warn"
+          );
+          location.href = writeUrl;
+        } else if (isTop) {
+          showNotice(
+            `❌ 글쓰기 페이지로 이동 실패\n직접 [글쓰기] 클릭해주세요. 글쓰기 페이지에서 자동 입력은 가능합니다.`,
+            "error",
+            true
+          );
+        }
+      }
+    }, 500);
+  }
+
+  async function executeWrite(data) {
+    if (executed) return;
+    console.log("[NCAFE cafe-write] write page execute, polling form…");
+
+    // 0.5초 간격으로 8초까지 폼 폴링
+    let elapsed = 0;
+    const interval = setInterval(() => {
+      // 폼이 보이면 시도
+      const hasForm = document.querySelector(
+        'input[name="subject"], input[placeholder*="제목"], .se-content, [contenteditable="true"], textarea'
+      );
+      if (!hasForm) {
+        elapsed += 500;
+        if (elapsed >= 8000) {
+          clearInterval(interval);
+          executed = true;
+          showNotice(
+            `❌ 글쓰기 폼을 찾지 못했습니다.\n페이지가 늦게 로드되거나 SmartEditor 호환 안 되는 카페일 수 있습니다.`,
+            "error",
+            true
+          );
+        }
+        return;
+      }
+
+      clearInterval(interval);
       executed = true;
-      console.log("[NCAFE cafe-write] write page detected, attempting fill");
 
-      // 카페별 닉네임 검증 (있을 때만 엄격 검사, 없으면 fill 진행 + 경고)
       const writeNick = extractWriteNickname();
       const expected = data.expectedNickname;
+      console.log("[NCAFE cafe-write] write nick:", writeNick, "expected:", expected);
 
       if (writeNick && writeNick !== expected) {
         showNotice(
@@ -294,7 +369,7 @@
           "error",
           true
         );
-        return; // 데이터 보존
+        return;
       }
 
       const { titleOk, bodyOk } = tryFill(data);
@@ -307,74 +382,48 @@
           `검토 후 [임시저장] 또는 [등록] 클릭하세요.`,
           "ok"
         );
-        try { await chrome.storage.local.remove(STORAGE_KEY); } catch {}
+        try { chrome.storage.local.remove(STORAGE_KEY); } catch {}
       } else if (titleOk || bodyOk) {
         showNotice(
           `⚠️ 일부만 자동 입력됨 (제목 ${titleOk ? "✓" : "✗"} / 본문 ${bodyOk ? "✓" : "✗"})\n` +
           `수동 보완 후 발행하세요.`,
           "warn"
         );
-        try { await chrome.storage.local.remove(STORAGE_KEY); } catch {}
+        try { chrome.storage.local.remove(STORAGE_KEY); } catch {}
       } else {
         showNotice(
-          `❌ 자동 입력 실패\n글쓰기 폼을 찾지 못했습니다.\n페이지가 완전히 로드된 후에도 안 되면 수동 입력하세요.`,
-          "error"
+          `❌ 자동 입력 실패\n글쓰기 폼에 데이터를 넣지 못했습니다. SmartEditor 변형일 수 있음.`,
+          "error",
+          true
         );
       }
-      return;
-    }
+    }, 500);
+  }
 
-    // 게시판 페이지 — 안내 + 글쓰기 버튼 클릭
-    if (isBoardPage()) {
-      executed = true;
-      console.log("[NCAFE cafe-write] board page detected");
+  async function dispatch() {
+    const data = await getData();
+    if (!data) return;
 
-      showNotice(
-        `📋 ${data.cafeName} 일상글 게시판 도착\n` +
-        `예정 페르소나: ${data.expectedPersona?.displayName} (${data.expectedNickname})\n` +
-        `잠시 후 글쓰기 페이지로 이동…\n` +
-        `(닉네임 검증은 글쓰기 페이지에서 자동 수행)`,
-        "ok"
-      );
-
-      // 글쓰기 버튼 찾기 (1초·2초 두 번 시도)
-      const click = () => {
-        const btn = findWriteButton();
-        if (btn) {
-          try { btn.click(); return true; } catch { return false; }
-        }
-        return false;
-      };
-      setTimeout(() => {
-        if (!click()) {
-          setTimeout(() => {
-            if (!click()) {
-              showNotice(
-                `⚠️ [글쓰기] 버튼을 찾지 못했습니다.\n` +
-                `직접 [글쓰기] 클릭 → 글쓰기 페이지에서 자동 입력됩니다.`,
-                "warn",
-                true
-              );
-              executed = false;  // 글쓰기 페이지로 직접 이동 시 다시 발화 가능하도록
-            }
-          }, 2000);
-        }
-      }, 1200);
+    if (isWritePage()) {
+      await executeWrite(data);
+    } else if (isBoardPage()) {
+      await executeBoard(data);
     }
   }
 
-  function schedule() {
-    if (executed) return;
-    setTimeout(() => execute().catch(() => {}), 1000);
-    setTimeout(() => execute().catch(() => {}), 3000);
-  }
-  schedule();
+  // 초기 + 1·3초 후 시도 (SPA 늦은 로드 대응)
+  setTimeout(() => dispatch().catch(() => {}), 500);
+  setTimeout(() => dispatch().catch(() => {}), 2500);
 
+  // SPA 네비게이션 감지
   let lastUrl = HREF();
   new MutationObserver(() => {
     if (HREF() === lastUrl) return;
     lastUrl = HREF();
     executed = false;
-    schedule();
+    writeButtonClicked = false;
+    console.log("[NCAFE cafe-write] URL changed:", lastUrl);
+    setTimeout(() => dispatch().catch(() => {}), 800);
+    setTimeout(() => dispatch().catch(() => {}), 2500);
   }).observe(document.body || document.documentElement, { subtree: true, childList: true });
 })();
