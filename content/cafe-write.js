@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.7)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.8)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,16 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.7 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.8 loaded on", location.hostname, "top=" + isTop);
+
+  // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
+  function isExtensionAlive() {
+    try {
+      return !!(chrome && chrome.storage && chrome.storage.local && chrome.runtime?.id);
+    } catch {
+      return false;
+    }
+  }
 
   const STORAGE_KEY = "ncafe_pending_auto_fill";
   const MAX_AGE_MS = 5 * 60 * 1000;
@@ -31,20 +40,27 @@
       const msg = event.data;
       if (!msg || msg.type !== "NCAFE_AUTO_FILL") return;
       if (!msg.data) return;
+      // 확장 reload 후 stale context면 silent skip (에러 로그 X)
+      if (!isExtensionAlive()) {
+        console.warn("[NCAFE cafe-write] extension context lost — 페이지를 새로고침하면 자동 입력이 작동합니다");
+        return;
+      }
       console.log("[NCAFE cafe-write] received postMessage:", msg.data.cafeName, msg.data.expectedNickname);
       try {
         chrome.storage.local.set(
           { [STORAGE_KEY]: { ...msg.data, ts: msg.data.ts || Date.now() } },
           () => {
-            if (chrome.runtime.lastError) {
-              console.error("[NCAFE cafe-write] storage set error", chrome.runtime.lastError);
+            const err = chrome.runtime?.lastError;
+            if (err) {
+              console.warn("[NCAFE cafe-write] storage set warning:", err.message);
             } else {
               console.log("[NCAFE cafe-write] storage saved OK ✓");
             }
           }
         );
       } catch (e) {
-        console.error("[NCAFE cafe-write] save failed", e);
+        // Extension context invalidated 등 — warn으로 (확장 에러 패널에 안 올라옴)
+        console.warn("[NCAFE cafe-write] save skipped (context lost):", e?.message ?? e);
       }
     });
     return;
@@ -370,6 +386,10 @@
   let writeButtonClicked = false;
 
   async function getData() {
+    if (!isExtensionAlive()) {
+      console.warn("[NCAFE cafe-write] extension context lost on cafe page — refresh");
+      return null;
+    }
     try {
       const stored = await chrome.storage.local.get(STORAGE_KEY);
       const data = stored[STORAGE_KEY];
@@ -385,7 +405,7 @@
       console.log("[NCAFE cafe-write] data found:", data.cafeName, "expected:", data.expectedNickname, "age(s):", Math.round((Date.now() - data.ts) / 1000));
       return data;
     } catch (e) {
-      console.error("[NCAFE cafe-write] storage read error", e);
+      console.warn("[NCAFE cafe-write] storage read skipped (context lost):", e?.message ?? e);
       return null;
     }
   }
