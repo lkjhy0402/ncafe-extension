@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.8)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.9)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.8 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.9 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -264,20 +264,40 @@
       .join(emptyP);
   }
 
+  // 진짜 본문 에디터인 contenteditable 찾기 (off-screen·aria-hidden·tiny clipboard 영역 제외)
+  function findVisibleEditable(doc) {
+    const candidates = doc.querySelectorAll('[contenteditable="true"]');
+    let bestSe = null;
+    let bestVisible = null;
+    for (const el of candidates) {
+      // aria-hidden 조상 제외 (clipboard용 hidden div)
+      if (el.closest('[aria-hidden="true"]')) continue;
+      const rect = el.getBoundingClientRect();
+      // off-screen 제외 (left/top -1000 미만이면 화면 밖)
+      if (rect.left < -500 || rect.top < -500) continue;
+      // 사이즈 너무 작은 것 제외 (clipboard용은 17px 너비)
+      if (rect.width < 100 || rect.height < 30) continue;
+      // SmartEditor 영역 우선
+      if (el.closest(".se-content")) {
+        bestSe = bestSe || el;
+      } else {
+        bestVisible = bestVisible || el;
+      }
+    }
+    return bestSe || bestVisible;
+  }
+
   function fillBody(doc, body) {
-    // 1차: SmartEditor v3의 contenteditable 영역 (가장 안정적)
-    const editable =
-      doc.querySelector('.se-content [contenteditable="true"]') ||
-      doc.querySelector('[contenteditable="true"][role="textbox"]') ||
-      doc.querySelector('[contenteditable="true"]');
+    // 1차: 가시성 필터 통과한 contenteditable
+    const editable = findVisibleEditable(doc);
     if (editable) {
       try {
         editable.focus();
-        // SmartEditor 영역 안이면 SmartEditor 클래스 사용
         const isSE = !!editable.closest(".se-content");
+        const rect = editable.getBoundingClientRect();
+        console.log(`[NCAFE cafe-write] body via contenteditable (smartEditor=${isSE}, ${Math.round(rect.width)}x${Math.round(rect.height)})`);
         editable.innerHTML = buildParagraphHtml(body, isSE);
         fireInput(editable);
-        console.log(`[NCAFE cafe-write] body via contenteditable (smartEditor=${isSE})`);
         return true;
       } catch (e) {
         console.error("[NCAFE cafe-write] body editable fill error", e);
