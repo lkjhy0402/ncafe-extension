@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.5)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.6)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.5 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.6 loaded on", location.hostname, "top=" + isTop);
 
   const STORAGE_KEY = "ncafe_pending_auto_fill";
   const MAX_AGE_MS = 5 * 60 * 1000;
@@ -179,6 +179,7 @@
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }
   // React가 관리하는 input/textarea의 value를 framework state까지 갱신되도록 설정
+  // React 16+의 _valueTracker hack으로 controlled input도 갱신됨
   function setReactValue(el, value) {
     try {
       const proto = el.tagName === "TEXTAREA"
@@ -193,6 +194,10 @@
     } catch {
       el.value = value;
     }
+    // React _valueTracker reset — tracker가 옛 값을 들고 있으면 React가 변경 무시
+    if (el._valueTracker) {
+      try { el._valueTracker.setValue(""); } catch {}
+    }
     fireInput(el);
   }
   function fillTitle(doc, title) {
@@ -202,27 +207,39 @@
       '.se-input-text-area input',
       'input[placeholder*="제목"]',
       '.tit_text input',
+      'textarea[placeholder*="제목"]',
       'input[type="text"][maxlength]',
     ];
     for (const sel of sels) {
       const el = doc.querySelector(sel);
-      if (el && el.tagName === "INPUT" && (el.offsetParent !== null || el.getClientRects().length > 0)) {
+      if (!el) continue;
+      const visible = el.offsetParent !== null || el.getClientRects().length > 0;
+      console.log(`[NCAFE cafe-write] title selector "${sel}":`, el.tagName, "visible:", visible);
+      if ((el.tagName === "INPUT" || el.tagName === "TEXTAREA") && visible) {
         try {
           el.focus();
           setReactValue(el, title);
+          console.log(`[NCAFE cafe-write]   ✓ title set via "${sel}"`);
           return true;
-        } catch { /* try next */ }
+        } catch (e) {
+          console.error(`[NCAFE cafe-write]   ✗ title set error:`, e);
+        }
       }
     }
+    console.log("[NCAFE cafe-write] no matching title input found");
     return false;
   }
   function fillBody(doc, body) {
     const seArea = doc.querySelector(".se-content");
     if (seArea) {
       const paragraphs = body.split(/\n\s*\n/).filter((p) => p.trim());
-      const html = paragraphs.map((p) =>
-        `<div class="se-text-paragraph"><span class="se-ff-nanumgothic se-fs15">${escapeHtml(p)}</span></div>`
-      ).join("");
+      // 단락 사이 시각적 간격을 위해 빈 paragraph 삽입
+      const emptyP = `<div class="se-text-paragraph"><br></div>`;
+      const html = paragraphs
+        .map((p) =>
+          `<div class="se-text-paragraph"><span class="se-ff-nanumgothic se-fs15">${escapeHtml(p)}</span></div>`
+        )
+        .join(emptyP);
       try {
         seArea.innerHTML = html;
         fireInput(seArea);
