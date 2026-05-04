@@ -175,20 +175,7 @@
       pickText(SELECTORS.cafeName) || getCafeNameFromShell() || getCafeNameFromURL();
     const url = window.location.href;
 
-    // ── A. 자동 수집: 본인이 본 글 모두 ──
-    console.log('[NCAFE] post_collected 전송. cafeName:', cafeName, 'url:', url.slice(-50));
-    const collectResult = await sendTrack("post_collected", {
-      url,
-      cafeName,
-      title,
-      body,
-      author,
-      commentCount,
-      viewCount,
-    });
-    console.log('[NCAFE] post_collected 응답:', JSON.stringify(collectResult));
-
-    // ── B. 본인 글 추적 (기존 흐름): post_stats → post_published ──
+    // 본인 글 추적: post_stats → post_published
     let result = await sendTrack("post_stats", {
       url,
       commentCount,

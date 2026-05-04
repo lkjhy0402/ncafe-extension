@@ -52,16 +52,14 @@ function updateStats(type) {
   const statKey = {
     post_published: "posts",
     post_stats: "posts",
-    post_collected: "collected",
-    board_posts_collected: "collected",
     cafe_membership: "cafes",
   }[type];
   if (!statKey) return;
 
   chrome.storage.local.get(["stats"], (result) => {
-    const stats = result.stats || { posts: 0, collected: 0, cafes: 0, weekStart: getWeekStart() };
+    const stats = result.stats || { posts: 0, cafes: 0, weekStart: getWeekStart() };
     if (stats.weekStart !== getWeekStart()) {
-      Object.assign(stats, { posts: 0, collected: 0, cafes: 0, weekStart: getWeekStart() });
+      Object.assign(stats, { posts: 0, cafes: 0, weekStart: getWeekStart() });
     }
     stats[statKey] = (stats[statKey] || 0) + 1;
     chrome.storage.local.set({ stats });

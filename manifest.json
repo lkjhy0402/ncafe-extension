@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NCAFE Tracker",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "네이버 카페 글 발행/통계/가입 상태를 NCAFE에 자동 추적",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
@@ -37,15 +37,6 @@
       "js": ["lib/toast.js", "content/post-page.js"],
       "run_at": "document_idle",
       "all_frames": true
-    },
-    {
-      "matches": [
-        "https://cafe.naver.com/*/ArticleList.nhn*",
-        "https://cafe.naver.com/f-e/cafes/*/menus/*"
-      ],
-      "js": ["lib/toast.js", "content/board-page.js"],
-      "run_at": "document_idle",
-      "all_frames": false
     }
   ],
   "web_accessible_resources": [
