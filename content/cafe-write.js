@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.12)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.13)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.12 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.13 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -299,11 +299,45 @@
     } catch { /* ignore */ }
   }
 
-  // SmartEditor에 paste 이벤트 시뮬레이션 — 가장 native한 방식, 편집 가능 상태 유지
+  // execCommand로 실제 타이핑 시뮬레이션 (가장 자연스러움 — 수동 타이핑과 구별 불가)
+  // 1) 기존 내용 전체 선택 → 삭제
+  // 2) 라인별로 insertText, 라인 사이에 insertParagraph 두 번 (Enter Enter = 빈 줄 간격)
+  function fillByExecCommand(doc, editable, body) {
+    try {
+      editable.focus();
+      const win = doc.defaultView || window;
+
+      // 기존 내용 전체 선택 후 삭제
+      const range = doc.createRange();
+      range.selectNodeContents(editable);
+      const sel = win.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      doc.execCommand("delete", false);
+
+      const lines = body.split(/\n+/).map((l) => l.trim()).filter((l) => l);
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0) {
+          // 단락 사이 빈 줄: Enter 두 번
+          doc.execCommand("insertParagraph", false);
+          doc.execCommand("insertParagraph", false);
+        }
+        doc.execCommand("insertText", false, lines[i]);
+      }
+
+      // 선택 해제 (잔여 selection 클리어)
+      setTimeout(() => clearSelection(win), 50);
+      return true;
+    } catch (e) {
+      console.error("[NCAFE cafe-write] execCommand fill error", e);
+      return false;
+    }
+  }
+
+  // SmartEditor paste 시뮬레이션 — execCommand 실패 시 fallback
   function pasteIntoEditor(doc, editable, body) {
     try {
       editable.focus();
-      // 1. 기존 내용 전체 선택 (없으면 그대로 paste)
       try {
         const range = doc.createRange();
         range.selectNodeContents(editable);
@@ -314,7 +348,6 @@
         }
       } catch {}
 
-      // 2. paste 이벤트 dispatch (SmartEditor가 paste를 native하게 처리)
       const lines = body.split(/\n+/).map((l) => l.trim()).filter((l) => l);
       const html = lines.map((l) => `<p>${escapeHtml(l)}</p>`).join("<p><br></p>");
       const text = lines.join("\n\n");
@@ -328,7 +361,6 @@
         clipboardData: dt,
       });
       const dispatched = editable.dispatchEvent(pasteEvent);
-      // 선택 상태 해제
       setTimeout(() => clearSelection(doc.defaultView), 100);
       return dispatched;
     } catch (e) {
@@ -338,22 +370,27 @@
   }
 
   function fillBody(doc, body) {
-    // 1차: 가시성 필터 통과한 contenteditable에 paste 시뮬레이션 (가장 안전, 편집 가능 상태 유지)
+    // 1차: contenteditable에 execCommand로 실제 타이핑 시뮬레이션 (가장 자연스러움)
     const editable = findVisibleEditable(doc);
     if (editable) {
       const isSE = !!editable.closest(".se-content");
       const rect = editable.getBoundingClientRect();
-      console.log(`[NCAFE cafe-write] body via paste (smartEditor=${isSE}, ${Math.round(rect.width)}x${Math.round(rect.height)})`);
+      console.log(`[NCAFE cafe-write] body via execCommand (smartEditor=${isSE}, ${Math.round(rect.width)}x${Math.round(rect.height)})`);
+      if (fillByExecCommand(doc, editable, body)) {
+        return true;
+      }
+      // execCommand 실패 시 paste 시뮬레이션
+      console.log("[NCAFE cafe-write] execCommand failed → paste fallback");
       if (pasteIntoEditor(doc, editable, body)) {
         return true;
       }
-      // paste 실패 시 innerHTML fallback
+      // paste도 실패 시 innerHTML
       try {
         editable.focus();
         editable.innerHTML = buildParagraphHtml(body, isSE);
         fireInput(editable);
         clearSelection(doc.defaultView);
-        console.log("[NCAFE cafe-write] body via innerHTML fallback");
+        console.log("[NCAFE cafe-write] body via innerHTML last fallback");
         return true;
       } catch (e) {
         console.error("[NCAFE cafe-write] body editable fill error", e);
