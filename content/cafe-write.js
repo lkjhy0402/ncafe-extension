@@ -1,45 +1,49 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.1)
 //
-// 1) NCAFE 도메인: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
-// 2) cafe.naver.com: 저장된 데이터 확인 → 닉네임 검증 → 글쓰기 페이지 이동 → 제목·본문 자동 입력
+// 흐름:
+//   1) NCAFE 도메인: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
+//   2) 카페 게시판 페이지: 알림 + [글쓰기] 버튼 클릭 → 글쓰기 페이지로 이동 (검증 X)
+//   3) 카페 글쓰기 페이지:
+//      - 카페별 닉네임 추출 시도 (글쓰기 폼에 표시되는 카페 닉네임)
+//      - 닉네임 추출 성공 + NCAFE 등록과 일치 → 자동 입력
+//      - 닉네임 불일치 → 경고 + 자동 입력 중단 (안전)
+//      - 닉네임 추출 실패 → 경고 후 자동 입력 진행 (확인은 본인이)
 //
-// 절대 [임시저장]/[등록] 자동 클릭 X — 본인이 직접 클릭해야 함 (약관 준수)
+// 절대 자동 [임시저장]/[등록] 클릭 X
 
 (function () {
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
+  console.log("[NCAFE cafe-write] loaded v1.2.1 on", location.hostname);
 
   const STORAGE_KEY = "ncafe_pending_auto_fill";
-  const MAX_AGE_MS = 5 * 60 * 1000; // 5분
+  const MAX_AGE_MS = 5 * 60 * 1000;
 
-  const onNCAFE = /(?:^|\.)ncafe-web\.vercel\.app$/.test(location.hostname) ||
-                  location.hostname.endsWith(".vercel.app");
+  const onNCAFE = location.hostname.endsWith("vercel.app");
   const onCafe = location.hostname === "cafe.naver.com";
 
-  // ─── A. NCAFE 도메인: postMessage 수신 → storage 저장 ──────────────
+  // ─── A. NCAFE 도메인: postMessage 수신 → storage 저장 ─────────────
   if (onNCAFE) {
     window.addEventListener("message", (event) => {
       if (event.source !== window) return;
       const msg = event.data;
       if (!msg || msg.type !== "NCAFE_AUTO_FILL") return;
       if (!msg.data) return;
-
       try {
         chrome.storage.local.set({
           [STORAGE_KEY]: { ...msg.data, ts: msg.data.ts || Date.now() },
         });
-        console.log("[NCAFE] auto-fill data saved", msg.data.cafeName);
+        console.log("[NCAFE cafe-write] saved auto-fill data:", msg.data.cafeName);
       } catch (e) {
-        console.error("[NCAFE] storage save failed", e);
+        console.error("[NCAFE cafe-write] storage save failed", e);
       }
     });
-    return; // NCAFE 측은 여기서 끝
+    return;
   }
 
-  // ─── B. 카페 도메인: 데이터 확인 후 검증 + 입력 ───────────────────
+  // ─── B. 카페 도메인: 검증 + 자동 입력 ────────────────────────────
   if (!onCafe) return;
 
-  // 페이지 종류
   const HREF = () => location.href;
   function isWritePage() {
     const u = HREF();
@@ -54,43 +58,56 @@
            /\/ca-fe\/cafes\/\d+\/menus\/\d+/.test(u);
   }
 
-  // ─── 닉네임 추출 (다중 셀렉터) ────────────────────────────────────
-  // 네이버 카페 디자인 변동에 대비해 여러 셀렉터를 시도. iframe도 포함.
-  const NICK_SELECTORS = [
+  // ─── 카페별 닉네임 추출 (글쓰기 페이지 전용) ──────────────────────
+  // 글쓰기 폼 근처에 노출되는 카페별 닉네임을 찾음.
+  // 다양한 카페·시점 디자인 대비 다중 셀렉터.
+  const WRITE_NICK_SELECTORS = [
+    // 글쓰기 폼 영역의 닉네임 표시
+    ".write_form .nick_text",
+    ".article-write-form .nick",
+    ".writer_info .nick",
+    ".write-info .nickname",
+    'input[name="memberNick"]',
+    'input[name="writerNick"]',
+    // SmartEditor 헤더의 작성자 표시
+    ".se-author-name",
+    // 우측 사이드 회원 정보
     ".cafe_member_nick",
     ".member_nick",
-    ".user-info .nickname",
-    ".user_nick",
-    ".profile_area .nick",
     ".my_info .nickname",
-    ".pers_nick_area .nickname",
-    'a[class*="my-cafe-nick"]',
-    'span[class*="nick"][class*="my"]',
-    "div.cafe_personal_area .nickname",
-    ".gnb_my_nickname",
+    ".profile_area .nick",
+    // 텍스트 패턴 fallback
     "[data-nickname]",
-    ".profile-nickname",
-    ".m_my_info .nickname",
   ];
+
   function cleanNick(s) {
     return (s || "")
       .replace(/(님|회원|\s*\(.*?\))$/g, "")
       .trim();
   }
+
   function extractNickFromDoc(doc) {
     if (!doc) return null;
-    for (const sel of NICK_SELECTORS) {
+    for (const sel of WRITE_NICK_SELECTORS) {
       const el = doc.querySelector(sel);
       if (!el) continue;
-      const txt = (el.textContent || el.dataset?.nickname || "").trim();
+      const txt = (el.value || el.textContent || el.dataset?.nickname || "").trim();
       if (txt && txt.length < 50) {
         const cleaned = cleanNick(txt);
         if (cleaned) return cleaned;
       }
     }
+    // 글쓰기 폼 안에서 텍스트 패턴 검색 ("닉네임: ㅇㅇㅇ")
+    const writeForm = doc.querySelector('form, .write_area, .article-write, .se-content');
+    if (writeForm) {
+      const text = writeForm.textContent || "";
+      const m = text.match(/닉네임\s*[:：]\s*([^\s\n,]{1,30})/);
+      if (m) return cleanNick(m[1]);
+    }
     return null;
   }
-  function extractCurrentNickname() {
+
+  function extractWriteNickname() {
     const top = extractNickFromDoc(document);
     if (top) return top;
     for (const iframe of document.querySelectorAll("iframe")) {
@@ -103,49 +120,53 @@
   }
 
   // ─── 토스트 알림 ─────────────────────────────────────────────────
-  function showNotice(message, type) {
-    // 우선 NCAFE_Toast 사용 (toast.js 로드된 경우)
+  function showNotice(message, type, persistent) {
     try {
       if (window.NCAFE_Toast?.show) {
         window.NCAFE_Toast.show({
           title: "NCAFE 자동 입력",
           message,
           type: type === "error" ? "err" : type === "warn" ? "warn" : "ok",
-          duration: 8000,
+          duration: persistent ? 30000 : 8000,
         });
         return;
       }
     } catch { /* fallthrough */ }
-
-    // fallback: 직접 DOM 알림
     const colors = { ok: "#16a34a", error: "#dc2626", warn: "#d97706" };
     const el = document.createElement("div");
     el.style.cssText =
       "position:fixed;top:20px;right:20px;background:" + (colors[type] || colors.ok) +
-      ";color:#fff;padding:14px 16px;border-radius:8px;z-index:2147483647;max-width:420px;" +
-      "font-size:13px;line-height:1.5;white-space:pre-line;box-shadow:0 6px 20px rgba(0,0,0,0.2);" +
+      ";color:#fff;padding:14px 18px;border-radius:8px;z-index:2147483647;max-width:440px;" +
+      "font-size:13px;line-height:1.55;white-space:pre-line;box-shadow:0 8px 24px rgba(0,0,0,0.2);" +
       'font-family:-apple-system,"Apple SD Gothic Neo",sans-serif;';
     el.textContent = message;
     document.body.appendChild(el);
-    setTimeout(() => el.remove(), 10000);
+    setTimeout(() => el.remove(), persistent ? 30000 : 10000);
   }
 
-  // ─── 글쓰기 버튼 찾기 ─────────────────────────────────────────────
+  // ─── 글쓰기 버튼 찾기 + 클릭 ─────────────────────────────────────
   function findWriteButton() {
-    const selectors = [
-      'a[href*="ArticleWrite"]',
-      'a[href*="/articles/write"]',
-      ".btn_write",
-      ".article-write-btn",
-      ".btn-write",
-      'button[class*="write"]',
-      'a[class*="write"]',
-    ];
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (el && /글쓰기|작성/.test(el.textContent || "") || el?.matches('a[href*="Write"]')) {
+    const candidates = Array.from(document.querySelectorAll(
+      'a, button, [role="button"]'
+    ));
+    for (const el of candidates) {
+      const text = (el.textContent || "").replace(/\s/g, "");
+      const href = el.getAttribute("href") || "";
+      if (
+        text === "글쓰기" || text.includes("글쓰기") ||
+        href.includes("ArticleWrite") || href.includes("/articles/write")
+      ) {
         return el;
       }
+    }
+    // class 기반 fallback
+    const classCandidates = [
+      ".btn_write", ".article-write-btn", ".btn-write",
+      'a[class*="write"]', 'button[class*="write"]',
+    ];
+    for (const sel of classCandidates) {
+      const el = document.querySelector(sel);
+      if (el) return el;
     }
     return null;
   }
@@ -162,69 +183,66 @@
       '.se-input-text-area input',
       'input[placeholder*="제목"]',
       '.tit_text input',
+      'input[type="text"][maxlength]',
     ];
     for (const sel of sels) {
       const el = doc.querySelector(sel);
-      if (el && el.tagName === "INPUT") {
-        el.focus();
-        el.value = title;
-        fireInput(el);
-        return true;
+      if (el && el.tagName === "INPUT" && el.offsetParent !== null) {
+        try {
+          el.focus();
+          el.value = title;
+          fireInput(el);
+          return true;
+        } catch { /* try next */ }
       }
     }
     return false;
   }
   function fillBody(doc, body) {
-    // SmartEditor v3 (se-)
+    // SmartEditor v3
     const seArea = doc.querySelector(".se-content");
     if (seArea) {
-      // 단락별로 분리하여 paragraph div 생성
       const paragraphs = body.split(/\n\s*\n/).filter((p) => p.trim());
-      const html = paragraphs
-        .map((p) => `<div class="se-text-paragraph">${escapeHtml(p)}</div>`)
-        .join("");
+      const html = paragraphs.map((p) =>
+        `<div class="se-text-paragraph"><span class="se-ff-nanumgothic se-fs15">${escapeHtml(p)}</span></div>`
+      ).join("");
       try {
         seArea.innerHTML = html;
         fireInput(seArea);
         return true;
       } catch { /* fallthrough */ }
     }
-
-    // 일반 contenteditable
+    // contenteditable
     const editable = doc.querySelector('[contenteditable="true"]');
     if (editable) {
-      editable.focus();
-      // \n\n을 <br><br>로
-      editable.innerHTML = escapeHtml(body).replace(/\n\n/g, "<br><br>").replace(/\n/g, "<br>");
-      fireInput(editable);
-      return true;
+      try {
+        editable.focus();
+        editable.innerHTML = escapeHtml(body).replace(/\n\n/g, "<br><br>").replace(/\n/g, "<br>");
+        fireInput(editable);
+        return true;
+      } catch { /* fallthrough */ }
     }
-
-    // textarea fallback
+    // textarea
     const ta = doc.querySelector("textarea");
     if (ta) {
-      ta.focus();
-      ta.value = body;
-      fireInput(ta);
-      return true;
+      try {
+        ta.focus();
+        ta.value = body;
+        fireInput(ta);
+        return true;
+      } catch { /* fallthrough */ }
     }
-
     return false;
   }
   function escapeHtml(s) {
     return String(s || "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   function tryFill(data) {
     let titleOk = fillTitle(document, data.title);
     let bodyOk = fillBody(document, data.body);
-
-    // iframe 내부 시도 (SmartEditor가 iframe을 쓰는 경우)
     if (!titleOk || !bodyOk) {
       for (const iframe of document.querySelectorAll("iframe")) {
         try {
@@ -236,7 +254,6 @@
         } catch { /* cross-origin */ }
       }
     }
-
     return { titleOk, bodyOk };
   }
 
@@ -244,6 +261,7 @@
   let executed = false;
   async function execute() {
     if (executed) return;
+
     let data;
     try {
       const stored = await chrome.storage.local.get(STORAGE_KEY);
@@ -253,84 +271,102 @@
     }
     if (!data) return;
 
-    // 만료 체크
     if (Date.now() - (data.ts || 0) > MAX_AGE_MS) {
       try { await chrome.storage.local.remove(STORAGE_KEY); } catch {}
       return;
     }
 
-    // 글쓰기 페이지 — 자동 입력 시도
+    // 글쓰기 페이지 — 검증 + 입력
     if (isWritePage()) {
       executed = true;
-      const { titleOk, bodyOk } = tryFill(data);
+      console.log("[NCAFE cafe-write] write page detected, attempting fill");
 
-      if (titleOk && bodyOk) {
+      // 카페별 닉네임 검증 (있을 때만 엄격 검사, 없으면 fill 진행 + 경고)
+      const writeNick = extractWriteNickname();
+      const expected = data.expectedNickname;
+
+      if (writeNick && writeNick !== expected) {
         showNotice(
-          `✅ 자동 입력 완료\n페르소나: ${data.expectedPersona?.displayName || "?"} (${data.expectedNickname || "?"})\n검토 후 [임시저장] 또는 [등록] 클릭하세요.`,
+          `⚠️ 카페 닉네임 불일치 — 자동 입력 중단\n` +
+          `예상: ${data.expectedPersona?.displayName} (${expected})\n` +
+          `실제: ${writeNick}\n\n` +
+          `올바른 계정으로 로그인 후 다시 [📤 자동 입력] 시도하세요.`,
+          "error",
+          true
+        );
+        return; // 데이터 보존
+      }
+
+      const { titleOk, bodyOk } = tryFill(data);
+      if (titleOk && bodyOk) {
+        const verified = writeNick === expected;
+        showNotice(
+          `✅ 자동 입력 완료\n` +
+          `페르소나: ${data.expectedPersona?.displayName} (${expected})\n` +
+          (verified ? `카페 닉네임 검증 ✓\n` : `(닉네임 자동 검증 불가 — 본인 확인 필요)\n`) +
+          `검토 후 [임시저장] 또는 [등록] 클릭하세요.`,
           "ok"
         );
         try { await chrome.storage.local.remove(STORAGE_KEY); } catch {}
       } else if (titleOk || bodyOk) {
         showNotice(
-          `⚠️ 일부만 자동 입력됨 (제목 ${titleOk ? "✓" : "✗"} / 본문 ${bodyOk ? "✓" : "✗"})\n수동 보완 후 발행하세요.`,
+          `⚠️ 일부만 자동 입력됨 (제목 ${titleOk ? "✓" : "✗"} / 본문 ${bodyOk ? "✓" : "✗"})\n` +
+          `수동 보완 후 발행하세요.`,
           "warn"
         );
         try { await chrome.storage.local.remove(STORAGE_KEY); } catch {}
       } else {
         showNotice(
-          "❌ 자동 입력 실패: 글쓰기 폼을 찾지 못했습니다. 페이지 새로고침 후 다시 시도하거나 수동 입력하세요.",
+          `❌ 자동 입력 실패\n글쓰기 폼을 찾지 못했습니다.\n페이지가 완전히 로드된 후에도 안 되면 수동 입력하세요.`,
           "error"
         );
       }
       return;
     }
 
-    // 게시판 페이지 — 검증 후 글쓰기 페이지로 유도
+    // 게시판 페이지 — 안내 + 글쓰기 버튼 클릭
     if (isBoardPage()) {
       executed = true;
+      console.log("[NCAFE cafe-write] board page detected");
 
-      // 페르소나 검증
-      const current = extractCurrentNickname();
-      if (!current) {
-        showNotice(
-          `❌ 카페 로그인 닉네임을 확인할 수 없습니다.\n${data.cafeName || "카페"}에 ${data.expectedPersona?.displayName} (${data.expectedNickname}) 계정으로 로그인 후 다시 시도하세요.`,
-          "error"
-        );
-        return; // 데이터 보존 (재시도 가능)
-      }
-      if (current !== data.expectedNickname) {
-        showNotice(
-          `⚠️ 잘못된 계정\n예상: ${data.expectedPersona?.displayName} (${data.expectedNickname})\n실제: ${current}\n올바른 계정으로 로그인 후 다시 시도하세요.`,
-          "error"
-        );
-        return; // 데이터 보존
-      }
-
-      // 검증 통과 — 글쓰기 버튼 찾아 클릭
       showNotice(
-        `✓ ${data.expectedPersona?.displayName} (${current}) 확인됨. 글쓰기 페이지로 이동합니다…`,
+        `📋 ${data.cafeName} 일상글 게시판 도착\n` +
+        `예정 페르소나: ${data.expectedPersona?.displayName} (${data.expectedNickname})\n` +
+        `잠시 후 글쓰기 페이지로 이동…\n` +
+        `(닉네임 검증은 글쓰기 페이지에서 자동 수행)`,
         "ok"
       );
-      const btn = findWriteButton();
-      if (btn) {
-        setTimeout(() => btn.click(), 800);
-      } else {
-        showNotice(
-          "⚠️ 글쓰기 버튼을 찾지 못했습니다. 직접 [글쓰기] 클릭 후 잠시 기다리면 자동 입력됩니다.",
-          "warn"
-        );
-        // executed=true이므로 다른 페이지로 이동 후 다시 발화는 안 됨
-        // 글쓰기 페이지로 이동 후 다시 트리거하려면 executed 리셋 필요
-        executed = false;
-      }
+
+      // 글쓰기 버튼 찾기 (1초·2초 두 번 시도)
+      const click = () => {
+        const btn = findWriteButton();
+        if (btn) {
+          try { btn.click(); return true; } catch { return false; }
+        }
+        return false;
+      };
+      setTimeout(() => {
+        if (!click()) {
+          setTimeout(() => {
+            if (!click()) {
+              showNotice(
+                `⚠️ [글쓰기] 버튼을 찾지 못했습니다.\n` +
+                `직접 [글쓰기] 클릭 → 글쓰기 페이지에서 자동 입력됩니다.`,
+                "warn",
+                true
+              );
+              executed = false;  // 글쓰기 페이지로 직접 이동 시 다시 발화 가능하도록
+            }
+          }, 2000);
+        }
+      }, 1200);
     }
   }
 
-  // 페이지 로드 후 + SPA 네비게이션 후 시도
   function schedule() {
     if (executed) return;
-    setTimeout(() => execute().catch(() => {}), 1500);
-    setTimeout(() => execute().catch(() => {}), 3500);
+    setTimeout(() => execute().catch(() => {}), 1000);
+    setTimeout(() => execute().catch(() => {}), 3000);
   }
   schedule();
 
