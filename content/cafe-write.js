@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.9)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.10)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.9 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.10 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -246,21 +246,27 @@
     return false;
   }
   // 본문 → SmartEditor 단락 구조로 변환
-  // \n\n+ 단위로 단락 분리, 각 단락 사이에 빈 <p> 삽입해 시각적 간격 확보
+  // 모든 줄바꿈(\n)을 단락 분리로 취급, 각 단락 사이에 빈 <p> 삽입해 시각적 간격 확보
+  // 즉 body가 \n\n 또는 \n 어떤 형식이든 줄별로 단락 분리
   function buildParagraphHtml(body, smartEditorClasses) {
-    const paragraphs = body.split(/\n\s*\n+/).filter((p) => p.trim());
-    const cls = smartEditorClasses ? ' class="se-text-paragraph"' : "";
+    const lines = String(body || "")
+      .split(/\n+/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    if (lines.length === 0) return "";
+
+    const cls = smartEditorClasses
+      ? ' class="se-text-paragraph se-text-paragraph-align-"'
+      : "";
     const span = smartEditorClasses
       ? '<span class="se-ff-nanumgothic se-fs15">'
       : "<span>";
     const emptyP = smartEditorClasses
-      ? '<p class="se-text-paragraph"><br></p>'
+      ? '<p class="se-text-paragraph se-text-paragraph-align-"><br></p>'
       : "<p><br></p>";
-    return paragraphs
-      .map((p) => {
-        const escaped = escapeHtml(p).replace(/\n/g, "<br>");
-        return `<p${cls}>${span}${escaped}</span></p>`;
-      })
+
+    return lines
+      .map((line) => `<p${cls}>${span}${escapeHtml(line)}</span></p>`)
       .join(emptyP);
   }
 
