@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.11)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.12)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.11 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.12 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -291,35 +291,101 @@
     return bestSe || bestVisible;
   }
 
+  // 텍스트 선택 해제 (innerHTML 설정 후 잔여 selection 제거)
+  function clearSelection(win) {
+    try {
+      const sel = (win || window).getSelection();
+      if (sel) sel.removeAllRanges();
+    } catch { /* ignore */ }
+  }
+
+  // SmartEditor에 paste 이벤트 시뮬레이션 — 가장 native한 방식, 편집 가능 상태 유지
+  function pasteIntoEditor(doc, editable, body) {
+    try {
+      editable.focus();
+      // 1. 기존 내용 전체 선택 (없으면 그대로 paste)
+      try {
+        const range = doc.createRange();
+        range.selectNodeContents(editable);
+        const sel = doc.defaultView?.getSelection();
+        if (sel) {
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      } catch {}
+
+      // 2. paste 이벤트 dispatch (SmartEditor가 paste를 native하게 처리)
+      const lines = body.split(/\n+/).map((l) => l.trim()).filter((l) => l);
+      const html = lines.map((l) => `<p>${escapeHtml(l)}</p>`).join("<p><br></p>");
+      const text = lines.join("\n\n");
+      const dt = new DataTransfer();
+      dt.setData("text/html", html);
+      dt.setData("text/plain", text);
+
+      const pasteEvent = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dt,
+      });
+      const dispatched = editable.dispatchEvent(pasteEvent);
+      // 선택 상태 해제
+      setTimeout(() => clearSelection(doc.defaultView), 100);
+      return dispatched;
+    } catch (e) {
+      console.error("[NCAFE cafe-write] paste simulation error", e);
+      return false;
+    }
+  }
+
   function fillBody(doc, body) {
-    // 1차: 가시성 필터 통과한 contenteditable
+    // 1차: 가시성 필터 통과한 contenteditable에 paste 시뮬레이션 (가장 안전, 편집 가능 상태 유지)
     const editable = findVisibleEditable(doc);
     if (editable) {
+      const isSE = !!editable.closest(".se-content");
+      const rect = editable.getBoundingClientRect();
+      console.log(`[NCAFE cafe-write] body via paste (smartEditor=${isSE}, ${Math.round(rect.width)}x${Math.round(rect.height)})`);
+      if (pasteIntoEditor(doc, editable, body)) {
+        return true;
+      }
+      // paste 실패 시 innerHTML fallback
       try {
         editable.focus();
-        const isSE = !!editable.closest(".se-content");
-        const rect = editable.getBoundingClientRect();
-        console.log(`[NCAFE cafe-write] body via contenteditable (smartEditor=${isSE}, ${Math.round(rect.width)}x${Math.round(rect.height)})`);
         editable.innerHTML = buildParagraphHtml(body, isSE);
         fireInput(editable);
+        clearSelection(doc.defaultView);
+        console.log("[NCAFE cafe-write] body via innerHTML fallback");
         return true;
       } catch (e) {
         console.error("[NCAFE cafe-write] body editable fill error", e);
       }
     }
-    // 2차: SmartEditor의 .se-content 직접
+    // 2차: .se-section 또는 .se-component-content 같은 deeper element
+    const innerArea = doc.querySelector(".se-section, .se-component-content-text");
+    if (innerArea) {
+      try {
+        innerArea.innerHTML = buildParagraphHtml(body, true);
+        fireInput(innerArea);
+        clearSelection(doc.defaultView);
+        console.log("[NCAFE cafe-write] body via .se-section/.se-component-content");
+        return true;
+      } catch (e) {
+        console.error("[NCAFE cafe-write] body section fill error", e);
+      }
+    }
+    // 3차: .se-content 직접 (마지막 수단)
     const seArea = doc.querySelector(".se-content");
     if (seArea) {
       try {
         seArea.innerHTML = buildParagraphHtml(body, true);
         fireInput(seArea);
+        clearSelection(doc.defaultView);
         console.log("[NCAFE cafe-write] body via .se-content");
         return true;
       } catch (e) {
         console.error("[NCAFE cafe-write] body se-content fill error", e);
       }
     }
-    // 3차: 일반 textarea
+    // 4차: 일반 textarea
     const ta = doc.querySelector("textarea");
     if (ta) {
       try {
