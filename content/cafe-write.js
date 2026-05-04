@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.14)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.16)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -9,12 +9,28 @@
 //   - all_frames:true 대응 (iframe 안에 있는 버튼·폼도 찾음)
 //   - 버튼/폼 폴링을 8초까지 (SPA 늦은 렌더 대응)
 //   - 글쓰기 버튼 못 찾으면 URL로 직접 이동 fallback
+//
+// 변경 (v1.2.15):
+//   - findActualEditor: .se-text-paragraph에서 위로 올라가 진짜 contenteditable 부모 찾기
+//     (이전 findVisibleEditable이 clipboard용 hidden contenteditable을 잡는 케이스 해결)
+//   - fillBody 우선순위 변경: execCommand(타이핑 시뮬레이션) 1순위 → DOM 직접 구성 fallback
+//     (DOM 직접 구성은 SmartEditor React state가 갱신 안 돼서 빈 글로 발행되던 문제)
+//   - fillByExecCommand에 placeholder 해제용 mousedown/click 이벤트 발화 추가
+//   - execCommand 후 textContent 검증으로 silent 실패 감지
+//
+// 변경 (v1.2.16):
+//   - findActualEditor 전략 0 추가: iframe 안의 body 자체가 contenteditable인 SmartEditor 변형 지원
+//     (한아름 카페 등에서 input_buffer iframe의 body가 진짜 본문 편집 영역)
+//   - fillBody 위험한 광범위 fallback 제거 (.se-section / .se-component-content innerHTML 직접 삽입)
+//     → 잘못된 영역에 들어가 React 가상 DOM 어긋나며 색칠+freeze 발생하던 케이스 차단
+//     → 못 찾으면 차라리 실패 토스트로 명확히 알림
+//   - editable.ownerDocument로 정확한 doc(top vs iframe) 식별해 execCommand가 올바른 frame에 작동
 
 (function () {
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.14 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.16 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -268,27 +284,69 @@
     }
   }
 
-  // 진짜 본문 에디터인 contenteditable 찾기 (off-screen·aria-hidden·tiny clipboard 영역 제외)
-  function findVisibleEditable(doc) {
-    const candidates = doc.querySelectorAll('[contenteditable="true"]');
-    let bestSe = null;
-    let bestVisible = null;
-    for (const el of candidates) {
-      // aria-hidden 조상 제외 (clipboard용 hidden div)
-      if (el.closest('[aria-hidden="true"]')) continue;
-      const rect = el.getBoundingClientRect();
-      // off-screen 제외 (left/top -1000 미만이면 화면 밖)
-      if (rect.left < -500 || rect.top < -500) continue;
-      // 사이즈 너무 작은 것 제외 (clipboard용은 17px 너비)
-      if (rect.width < 100 || rect.height < 30) continue;
-      // SmartEditor 영역 우선
-      if (el.closest(".se-content")) {
-        bestSe = bestSe || el;
-      } else {
-        bestVisible = bestVisible || el;
+  // 진짜 본문 에디터 찾기 — 사용자가 타이핑할 때 실제로 텍스트가 들어가는 contenteditable
+  // 전략 0: iframe 안의 body 자체가 contenteditable인 SmartEditor 변형 (한아름 등)
+  // 전략 1: 기존 .se-text-paragraph에서 위로 올라가며 contenteditable 부모 찾기
+  // 전략 2: .se-content 안에서 가장 큰 visible contenteditable
+  // 전략 3: aria-hidden·off-screen·tiny clipboard 영역 제외한 contenteditable
+  //
+  // 주의: el.isContentEditable은 부모로부터 상속받은 값까지 true가 되므로 paragraph도 true.
+  //       명시적 속성 보유자를 찾으려면 el.contentEditable === "true"로 체크해야 함.
+  function findActualEditor(doc) {
+    // 전략 0: iframe 안의 body가 contenteditable (SmartEditor 일부 변형 — input_buffer iframe 등)
+    for (const iframe of doc.querySelectorAll('iframe')) {
+      try {
+        const idoc = iframe.contentDocument;
+        if (!idoc) continue;
+        if (idoc.body && idoc.body.contentEditable === "true") {
+          return idoc.body;
+        }
+        // iframe 안 다른 명시적 contenteditable
+        const innerCE = idoc.querySelectorAll('[contenteditable="true"]');
+        for (const el of innerCE) {
+          if (el.contentEditable !== "true") continue;
+          const r = el.getBoundingClientRect();
+          // iframe 내부 좌표 기준이라 크기만 검증 (작은 clipboard div 제외)
+          if (r.width < 50 && r.height < 20) continue;
+          return el;
+        }
+      } catch { /* cross-origin iframe — skip */ }
+    }
+
+    // 전략 1: paragraph의 부모로 올라가며 명시적 contenteditable=true 노드 찾기
+    const existingPara = doc.querySelector(".se-text-paragraph");
+    if (existingPara) {
+      let cur = existingPara.parentElement;
+      while (cur && cur !== doc.body) {
+        if (cur.contentEditable === "true") {
+          const rect = cur.getBoundingClientRect();
+          if (rect.width > 100 && rect.height > 30) {
+            return cur;
+          }
+        }
+        cur = cur.parentElement;
       }
     }
-    return bestSe || bestVisible;
+
+    // 전략 2: .se-content 안의 큰 contenteditable
+    const seCandidates = doc.querySelectorAll('.se-content [contenteditable="true"]');
+    for (const el of seCandidates) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 200 && rect.height > 50) {
+        return el;
+      }
+    }
+
+    // 전략 3: 그 외 visible contenteditable (clipboard div 제외)
+    const all = doc.querySelectorAll('[contenteditable="true"]');
+    for (const el of all) {
+      if (el.closest('[aria-hidden="true"]')) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.left < -500 || rect.top < -500) continue;
+      if (rect.width < 200 || rect.height < 50) continue;
+      return el;
+    }
+    return null;
   }
 
   // 텍스트 선택 해제 (innerHTML 설정 후 잔여 selection 제거)
@@ -358,11 +416,17 @@
     }
   }
 
-  // execCommand로 실제 타이핑 시뮬레이션 (DOM 직접 구성 실패 시 fallback)
-  // 1) 기존 내용 전체 선택 → 삭제
-  // 2) 라인별로 insertText, 라인 사이에 insertParagraph 두 번 (Enter Enter = 빈 줄 간격)
+  // execCommand로 실제 타이핑 시뮬레이션 — 1순위 전략
+  // SmartEditor의 React state까지 정상 갱신되도록 사용자 타이핑과 동일한 경로 사용
+  // 1) placeholder 해제 (mousedown/mouseup/click)
+  // 2) 기존 내용 전체 선택 → 삭제
+  // 3) 라인별로 insertText, 라인 사이에 insertParagraph 두 번 (Enter Enter = 빈 줄 간격)
   function fillByExecCommand(doc, editable, body) {
     try {
+      // placeholder 모드 해제 — 진짜 사용자 클릭과 동일한 시퀀스
+      editable.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      editable.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+      editable.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       editable.focus();
       const win = doc.defaultView || window;
 
@@ -383,6 +447,9 @@
         }
         doc.execCommand("insertText", false, lines[i]);
       }
+
+      // React state 갱신 보장 (insertText가 input 이벤트를 자체 발화하지만 한 번 더)
+      editable.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
 
       // 선택 해제 (잔여 selection 클리어)
       setTimeout(() => clearSelection(win), 50);
@@ -428,64 +495,59 @@
     }
   }
 
+  // 에디터에 텍스트가 실제로 들어갔는지 검증 — execCommand가 silent로 무시하는 경우 감지
+  function editorHasText(editable) {
+    const t = (editable.textContent || "").trim();
+    return t.length > 0;
+  }
+
   function fillBody(doc, body) {
-    // 1차: contenteditable에 SmartEditor 정규 DOM 직접 구성 (정확한 CSS 클래스로 색·간격 보장)
-    const editable = findVisibleEditable(doc);
+    // 진짜 본문 contenteditable 확보 — top frame + iframe 안까지 탐색
+    const editable = findActualEditor(doc);
     if (editable) {
+      // editable이 iframe 안 element면 그 iframe의 contentDocument를 사용해야
+      // execCommand·Range·Selection이 올바른 frame에 작동
+      const editorDoc = editable.ownerDocument || doc;
       const isSE = !!editable.closest(".se-content");
+      const inIframe = editorDoc !== doc;
       const rect = editable.getBoundingClientRect();
-      console.log(`[NCAFE cafe-write] body via DOM build (smartEditor=${isSE}, ${Math.round(rect.width)}x${Math.round(rect.height)})`);
-      if (fillByDomConstruction(doc, editable, body)) {
+      console.log(`[NCAFE cafe-write] editor target (smartEditor=${isSE}, inIframe=${inIframe}, tag=${editable.tagName}, ${Math.round(rect.width)}x${Math.round(rect.height)})`);
+
+      // 1차: execCommand로 타이핑 시뮬레이션 (SmartEditor React state 정상 갱신)
+      if (fillByExecCommand(editorDoc, editable, body) && editorHasText(editable)) {
+        console.log("[NCAFE cafe-write] body via execCommand ✓");
         return true;
       }
-      // DOM 구성 실패 시 execCommand 시도
-      console.log("[NCAFE cafe-write] DOM build failed → execCommand fallback");
-      if (fillByExecCommand(doc, editable, body)) {
+      console.log("[NCAFE cafe-write] execCommand inserted nothing → DOM construction fallback");
+
+      // 2차: DOM 직접 구성 (CSS 클래스 정확하지만 React state 갱신 안 될 수 있음)
+      if (fillByDomConstruction(editorDoc, editable, body) && editorHasText(editable)) {
+        console.log("[NCAFE cafe-write] body via DOM build ✓");
         return true;
       }
-      // execCommand 실패 시 paste 시뮬레이션
-      if (pasteIntoEditor(doc, editable, body)) {
+      // 3차: paste 시뮬레이션
+      if (pasteIntoEditor(editorDoc, editable, body) && editorHasText(editable)) {
+        console.log("[NCAFE cafe-write] body via paste ✓");
         return true;
       }
-      // 마지막 fallback: innerHTML
+      // 4차 (마지막): innerHTML
       try {
         editable.focus();
         editable.innerHTML = buildParagraphHtml(body, isSE);
         fireInput(editable);
-        clearSelection(doc.defaultView);
+        clearSelection(editorDoc.defaultView);
         console.log("[NCAFE cafe-write] body via innerHTML last fallback");
         return true;
       } catch (e) {
         console.error("[NCAFE cafe-write] body editable fill error", e);
       }
     }
-    // 2차: .se-section 또는 .se-component-content 같은 deeper element
-    const innerArea = doc.querySelector(".se-section, .se-component-content-text");
-    if (innerArea) {
-      try {
-        innerArea.innerHTML = buildParagraphHtml(body, true);
-        fireInput(innerArea);
-        clearSelection(doc.defaultView);
-        console.log("[NCAFE cafe-write] body via .se-section/.se-component-content");
-        return true;
-      } catch (e) {
-        console.error("[NCAFE cafe-write] body section fill error", e);
-      }
-    }
-    // 3차: .se-content 직접 (마지막 수단)
-    const seArea = doc.querySelector(".se-content");
-    if (seArea) {
-      try {
-        seArea.innerHTML = buildParagraphHtml(body, true);
-        fireInput(seArea);
-        clearSelection(doc.defaultView);
-        console.log("[NCAFE cafe-write] body via .se-content");
-        return true;
-      } catch (e) {
-        console.error("[NCAFE cafe-write] body se-content fill error", e);
-      }
-    }
-    // 4차: 일반 textarea
+
+    // 광범위 fallback (.se-section / .se-content 직접 innerHTML 삽입)은 v1.2.16에서 제거.
+    // 이유: 본문이 아닌 영역(미리보기·렌더 캐시 등)에 들어가 React 가상 DOM과 어긋나며
+    //       색칠+freeze 발생. 잘못된 곳에 넣느니 실패로 명확히 처리.
+
+    // 마지막 fallback: 일반 textarea (구형 카페 호환)
     const ta = doc.querySelector("textarea");
     if (ta) {
       try {
