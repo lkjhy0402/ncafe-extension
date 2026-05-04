@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.2)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.3)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.2 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.3 loaded on", location.hostname, "top=" + isTop);
 
   const STORAGE_KEY = "ncafe_pending_auto_fill";
   const MAX_AGE_MS = 5 * 60 * 1000;
@@ -48,23 +48,14 @@
   const HREF = () => location.href;
   function isWritePage() {
     const u = HREF();
-    return u.includes("ArticleWrite.nhn") ||
-           /\/f-e\/cafes\/\d+\/articles\/write/.test(u) ||
-           /\/ca-fe\/cafes\/\d+\/articles\/write/.test(u);
+    // /articles/write 패턴이 있으면 어떤 prefix(f-e, ca-fe)나 메뉴 경로(/menus/X/)가 있어도 글쓰기 페이지
+    return u.includes("ArticleWrite.nhn") || /\/articles\/write/.test(u);
   }
   function isBoardPage() {
     const u = HREF();
+    if (isWritePage()) return false; // 글쓰기 페이지는 게시판으로 분류 X
     return u.includes("ArticleList.nhn") ||
-           /\/f-e\/cafes\/\d+\/menus\/\d+/.test(u) ||
-           /\/ca-fe\/cafes\/\d+\/menus\/\d+/.test(u);
-  }
-  function extractCafeId(url) {
-    const m = url.match(/\/cafes\/(\d+)/);
-    return m ? m[1] : null;
-  }
-  function extractMenuId(url) {
-    const m = url.match(/\/menus\/(\d+)/);
-    return m ? m[1] : null;
+           /\/(?:f-e|ca-fe)\/cafes\/\d+\/menus\/\d+/.test(u);
   }
 
   // ─── 카페별 닉네임 추출 (글쓰기 페이지 전용) ──────────────────────
@@ -171,13 +162,8 @@
     return null;
   }
 
-  // 직접 URL 이동 fallback (글쓰기 버튼 못 찾을 때)
-  function buildWriteUrl(boardUrl) {
-    const cafeId = extractCafeId(boardUrl);
-    const menuId = extractMenuId(boardUrl);
-    if (!cafeId || !menuId) return null;
-    return `https://cafe.naver.com/f-e/cafes/${cafeId}/articles/write?menuId=${menuId}`;
-  }
+  // 직접 URL 이동 fallback은 URL 패턴이 카페별로 달라서 위험.
+  // 제거: 글쓰기 버튼 못 찾으면 사용자가 직접 클릭하도록 안내.
 
   // ─── 폼 입력 ─────────────────────────────────────────────────────
   function fireInput(el) {
@@ -297,6 +283,8 @@
     let elapsed = 0;
     const interval = setInterval(() => {
       if (writeButtonClicked) { clearInterval(interval); return; }
+      // 페이지가 이미 글쓰기 페이지로 바뀌었으면 중단
+      if (isWritePage()) { clearInterval(interval); writeButtonClicked = true; return; }
       const btn = findWriteButton();
       if (btn) {
         writeButtonClicked = true;
@@ -308,19 +296,12 @@
       elapsed += 500;
       if (elapsed >= 8000) {
         clearInterval(interval);
-        // fallback: 직접 URL 이동
-        const writeUrl = buildWriteUrl(data.cafeUrl);
-        if (writeUrl && isTop) {
-          console.log("[NCAFE cafe-write] button not found, navigating to", writeUrl);
+        if (isTop) {
           showNotice(
-            `🔄 [글쓰기] 버튼 못 찾음 → 글쓰기 페이지로 직접 이동`,
-            "warn"
-          );
-          location.href = writeUrl;
-        } else if (isTop) {
-          showNotice(
-            `❌ 글쓰기 페이지로 이동 실패\n직접 [글쓰기] 클릭해주세요. 글쓰기 페이지에서 자동 입력은 가능합니다.`,
-            "error",
+            `⚠️ [글쓰기] 버튼을 자동으로 찾지 못했습니다.\n` +
+            `직접 [✏ 글쓰기] 버튼을 클릭하세요.\n` +
+            `글쓰기 페이지로 이동하면 자동 입력됩니다.`,
+            "warn",
             true
           );
         }
