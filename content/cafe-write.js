@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.13)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.14)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.13 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.14 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -299,7 +299,66 @@
     } catch { /* ignore */ }
   }
 
-  // execCommand로 실제 타이핑 시뮬레이션 (가장 자연스러움 — 수동 타이핑과 구별 불가)
+  // SmartEditor 정규 구조로 DOM 직접 구성 (CSS 클래스 정확 → 사용자 타이핑과 동일한 색·간격)
+  // 각 단락: <p class="se-text-paragraph se-text-paragraph-align-">
+  //           <span class="se-ff-nanumgothic se-fs15">내용</span></p>
+  // 단락 사이: 같은 구조의 빈 단락 (span 안에 &nbsp;)
+  function buildSeParagraph(doc, text, isEmpty) {
+    const p = doc.createElement("p");
+    p.className = "se-text-paragraph se-text-paragraph-align-";
+    p.style.lineHeight = "1.5";
+    const span = doc.createElement("span");
+    span.className = "se-ff-nanumgothic se-fs15";
+    span.style.color = "#000";
+    if (isEmpty) {
+      span.innerHTML = "&nbsp;";
+    } else {
+      span.textContent = text;
+    }
+    p.appendChild(span);
+    return p;
+  }
+
+  function fillByDomConstruction(doc, editable, body) {
+    try {
+      // 에디터 활성화 (placeholder 모드 해제)
+      editable.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      editable.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+      editable.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      editable.focus();
+
+      // 기존 자식 모두 제거
+      while (editable.firstChild) editable.removeChild(editable.firstChild);
+
+      const lines = body.split(/\n+/).map((l) => l.trim()).filter((l) => l);
+      for (let i = 0; i < lines.length; i++) {
+        editable.appendChild(buildSeParagraph(doc, lines[i], false));
+        if (i < lines.length - 1) {
+          editable.appendChild(buildSeParagraph(doc, "", true));
+        }
+      }
+
+      // React onInput 발화로 SmartEditor state 갱신
+      editable.dispatchEvent(
+        new InputEvent("input", {
+          inputType: "insertText",
+          data: body,
+          bubbles: true,
+          composed: true,
+        })
+      );
+      editable.dispatchEvent(new Event("change", { bubbles: true }));
+
+      // 선택 해제
+      setTimeout(() => clearSelection(doc.defaultView), 50);
+      return true;
+    } catch (e) {
+      console.error("[NCAFE cafe-write] DOM construction error", e);
+      return false;
+    }
+  }
+
+  // execCommand로 실제 타이핑 시뮬레이션 (DOM 직접 구성 실패 시 fallback)
   // 1) 기존 내용 전체 선택 → 삭제
   // 2) 라인별로 insertText, 라인 사이에 insertParagraph 두 번 (Enter Enter = 빈 줄 간격)
   function fillByExecCommand(doc, editable, body) {
@@ -370,21 +429,25 @@
   }
 
   function fillBody(doc, body) {
-    // 1차: contenteditable에 execCommand로 실제 타이핑 시뮬레이션 (가장 자연스러움)
+    // 1차: contenteditable에 SmartEditor 정규 DOM 직접 구성 (정확한 CSS 클래스로 색·간격 보장)
     const editable = findVisibleEditable(doc);
     if (editable) {
       const isSE = !!editable.closest(".se-content");
       const rect = editable.getBoundingClientRect();
-      console.log(`[NCAFE cafe-write] body via execCommand (smartEditor=${isSE}, ${Math.round(rect.width)}x${Math.round(rect.height)})`);
+      console.log(`[NCAFE cafe-write] body via DOM build (smartEditor=${isSE}, ${Math.round(rect.width)}x${Math.round(rect.height)})`);
+      if (fillByDomConstruction(doc, editable, body)) {
+        return true;
+      }
+      // DOM 구성 실패 시 execCommand 시도
+      console.log("[NCAFE cafe-write] DOM build failed → execCommand fallback");
       if (fillByExecCommand(doc, editable, body)) {
         return true;
       }
       // execCommand 실패 시 paste 시뮬레이션
-      console.log("[NCAFE cafe-write] execCommand failed → paste fallback");
       if (pasteIntoEditor(doc, editable, body)) {
         return true;
       }
-      // paste도 실패 시 innerHTML
+      // 마지막 fallback: innerHTML
       try {
         editable.focus();
         editable.innerHTML = buildParagraphHtml(body, isSE);
