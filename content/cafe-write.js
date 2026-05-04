@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.3)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.4)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -14,7 +14,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.3 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.4 loaded on", location.hostname, "top=" + isTop);
 
   const STORAGE_KEY = "ncafe_pending_auto_fill";
   const MAX_AGE_MS = 5 * 60 * 1000;
@@ -25,16 +25,24 @@
   // ─── A. NCAFE: postMessage → storage ─────────────────────────────
   if (onNCAFE) {
     if (!isTop) return; // postMessage는 top frame에서만
+    console.log("[NCAFE cafe-write] NCAFE side ready, listening postMessage");
     window.addEventListener("message", (event) => {
       if (event.source !== window) return;
       const msg = event.data;
       if (!msg || msg.type !== "NCAFE_AUTO_FILL") return;
       if (!msg.data) return;
+      console.log("[NCAFE cafe-write] received postMessage:", msg.data.cafeName, msg.data.expectedNickname);
       try {
-        chrome.storage.local.set({
-          [STORAGE_KEY]: { ...msg.data, ts: msg.data.ts || Date.now() },
-        });
-        console.log("[NCAFE cafe-write] saved:", msg.data.cafeName);
+        chrome.storage.local.set(
+          { [STORAGE_KEY]: { ...msg.data, ts: msg.data.ts || Date.now() } },
+          () => {
+            if (chrome.runtime.lastError) {
+              console.error("[NCAFE cafe-write] storage set error", chrome.runtime.lastError);
+            } else {
+              console.log("[NCAFE cafe-write] storage saved OK ✓");
+            }
+          }
+        );
       } catch (e) {
         console.error("[NCAFE cafe-write] save failed", e);
       }
@@ -254,13 +262,19 @@
     try {
       const stored = await chrome.storage.local.get(STORAGE_KEY);
       const data = stored[STORAGE_KEY];
-      if (!data) return null;
+      if (!data) {
+        console.log("[NCAFE cafe-write] storage empty (no auto-fill pending)");
+        return null;
+      }
       if (Date.now() - (data.ts || 0) > MAX_AGE_MS) {
+        console.log("[NCAFE cafe-write] data expired (>5min), clearing");
         try { await chrome.storage.local.remove(STORAGE_KEY); } catch {}
         return null;
       }
+      console.log("[NCAFE cafe-write] data found:", data.cafeName, "expected:", data.expectedNickname, "age(s):", Math.round((Date.now() - data.ts) / 1000));
       return data;
-    } catch {
+    } catch (e) {
+      console.error("[NCAFE cafe-write] storage read error", e);
       return null;
     }
   }
@@ -385,10 +399,15 @@
     const data = await getData();
     if (!data) return;
 
+    const url = HREF();
     if (isWritePage()) {
+      console.log("[NCAFE cafe-write] dispatch → write page", url);
       await executeWrite(data);
     } else if (isBoardPage()) {
+      console.log("[NCAFE cafe-write] dispatch → board page", url);
       await executeBoard(data);
+    } else {
+      console.log("[NCAFE cafe-write] dispatch → page type unknown, skip", url);
     }
   }
 
