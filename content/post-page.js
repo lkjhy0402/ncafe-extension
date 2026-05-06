@@ -124,12 +124,49 @@
     return "";
   }
 
+  // 카페 가입 안내·로그인 안내·접근 권한 없음 등 article view가 아닌 안내 페이지 감지
+  // 이걸 article view로 잘못 판정하면 안내 메시지가 글 본문으로 추적되어 brief.content가 오염됨
+  function isRestrictedAccessPage() {
+    const text = (document.body?.innerText || "").trim();
+    if (!text) return false;
+    const patterns = [
+      /이 카페는 회원만 가입할 수 있습니다/,
+      /가입 후 이용해\s*주세요/,
+      /회원 전용/,
+      /로그인 후 이용/,
+      /접근 권한이 없/,
+      /비공개 카페/,
+      /본 카페에 가입하셔야/,
+    ];
+    return patterns.some((p) => p.test(text));
+  }
+
+  // title/body 텍스트가 시스템 안내 메시지 패턴인지 — 추적 가드용
+  function looksLikeSystemMessage(s) {
+    const t = (s || "").trim();
+    if (!t) return false;
+    const patterns = [
+      /이 카페는 회원만/,
+      /가입 후 이용해/,
+      /회원 전용/,
+      /로그인 후 이용/,
+      /접근 권한이 없/,
+      /비공개 카페/,
+      /본 카페에 가입/,
+      /^죄송합니다[.\s]/,
+    ];
+    return patterns.some((p) => p.test(t));
+  }
+
   function isArticleView() {
     // URL 기반 감지 (가장 신뢰성 높음)
     if (/\/articles\/\d+/.test(location.href)) return true;
     if (location.href.includes("ArticleRead")) return true;
     // DOM 기반 감지 (iframe 내부 또는 SPA 렌더링 후)
-    return SELECTORS.body.some((sel) => document.querySelector(sel));
+    if (!SELECTORS.body.some((sel) => document.querySelector(sel))) return false;
+    // 카페 안내 페이지 같으면 article view 아님 (false positive 차단)
+    if (isRestrictedAccessPage()) return false;
+    return true;
   }
 
   async function sendTrack(type, payload) {
@@ -156,6 +193,13 @@
       .find((el) => el);
     const body = bodyEl ? (bodyEl.innerText || "").trim() : "";
     console.log('[NCAFE] 추출 결과 — title:', title.slice(0,30), 'body길이:', body.length, 'author:', author);
+
+    // 시스템 안내 메시지(가입 안내·로그인 안내 등) 감지 시 추적 중단
+    // 가입 안 된 카페에 자동 입력 시도하면 안내 메시지가 title selector에 매칭되는 케이스 방지
+    if (looksLikeSystemMessage(title) || looksLikeSystemMessage(body)) {
+      console.log('[NCAFE] post-page.js: 시스템 안내 메시지 감지 → 추적 skip');
+      return;
+    }
 
     if (!title && !body) {
       if (!process._retried) {

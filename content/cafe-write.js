@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.16)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.17 — post-page.js·track route에서 시스템 안내 메시지 가드 추가)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -30,7 +30,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.16 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.17 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
