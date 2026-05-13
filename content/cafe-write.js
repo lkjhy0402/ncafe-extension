@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.17 — post-page.js·track route에서 시스템 안내 메시지 가드 추가)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.18 — 단락 사이 빈 줄 보존: insertParagraph 사이에 NBSP 삽입해 빈 단락 collapse 회피)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -30,7 +30,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.17 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.18 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -441,8 +441,10 @@
       const lines = body.split(/\n+/).map((l) => l.trim()).filter((l) => l);
       for (let i = 0; i < lines.length; i++) {
         if (i > 0) {
-          // 단락 사이 빈 줄: Enter 두 번
+          // 단락 사이 빈 줄: 새 단락 → nbsp 삽입(빈 단락이 SmartEditor·일부 contenteditable에서
+          // collapse되어 안 보이는 문제 회피) → 다시 새 단락
           doc.execCommand("insertParagraph", false);
+          doc.execCommand("insertText", false, " ");
           doc.execCommand("insertParagraph", false);
         }
         doc.execCommand("insertText", false, lines[i]);
