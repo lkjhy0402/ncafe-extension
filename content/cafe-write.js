@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.20 — 단락 보존 강화: 단순 공백 대신 insertHTML로 NBSP가 든 SmartEditor-호환 빈 단락 명시 삽입)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.21 — 글쓰기 버튼 찾기 강화: ✏️ VS16/zero-width 정규화 + aria-label/title 매칭 추가)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -30,7 +30,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.20 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.21 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -174,22 +174,45 @@
   }
 
   // ─── 글쓰기 버튼 찾기 ─────────────────────────────────────────────
+  // v1.2.21: 이모지 variation selector (U+FE0F), zero-width chars, ✏ 자체까지 모두 제거 후
+  //          순수 "글쓰기"만 비교. 영주맘 카페처럼 "✏️ 글쓰기" 형태 (VS16 포함) 대응.
+  function isVisible(el) {
+    return el.offsetParent !== null || el.getClientRects().length > 0;
+  }
+  function normalizeButtonText(s) {
+    return String(s || "")
+      .replace(/[​-‍﻿️]/g, "") // zero-width + VS16 (emoji presentation)
+      .replace(/\s+/g, "")                          // 공백 모두
+      .replace(/[✏✎✍🖉🖊🖋📝]/g, "");                 // 흔한 펜·연필 이모지 제거
+  }
   function findWriteButton() {
-    // 텍스트 기반 (우선)
     const candidates = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+
+    // 텍스트 기반 (정규화 후 정확 매칭)
     for (const el of candidates) {
-      const text = (el.textContent || "").replace(/\s/g, "");
-      if (text === "글쓰기" || text === "✏글쓰기" || /^✏?\s*글쓰기/.test(text.replace(/\s/g, ""))) {
-        if (el.offsetParent !== null || el.getClientRects().length > 0) return el;
+      const normalized = normalizeButtonText(el.textContent);
+      if (normalized === "글쓰기" && isVisible(el)) {
+        return el;
       }
     }
+
+    // aria-label / title / data-tip 등 보조 속성 매칭 (텍스트 없는 아이콘 버튼 대응)
+    for (const el of candidates) {
+      const aria = normalizeButtonText(el.getAttribute("aria-label"));
+      const title = normalizeButtonText(el.getAttribute("title"));
+      if ((aria === "글쓰기" || title === "글쓰기") && isVisible(el)) {
+        return el;
+      }
+    }
+
     // href 기반
     for (const el of candidates) {
       const href = el.getAttribute("href") || "";
       if (href.includes("ArticleWrite") || href.includes("/articles/write")) {
-        return el;
+        if (isVisible(el)) return el;
       }
     }
+
     // class 기반
     const classCandidates = [
       ".btn_write", ".article-write-btn", ".btn-write",
@@ -197,8 +220,9 @@
     ];
     for (const sel of classCandidates) {
       const el = document.querySelector(sel);
-      if (el && (el.offsetParent !== null || el.getClientRects().length > 0)) return el;
+      if (el && isVisible(el)) return el;
     }
+
     return null;
   }
 
