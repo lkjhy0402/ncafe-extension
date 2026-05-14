@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.18 — 단락 사이 빈 줄 보존: insertParagraph 사이에 NBSP 삽입해 빈 단락 collapse 회피)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.20 — 단락 보존 강화: 단순 공백 대신 insertHTML로 NBSP가 든 SmartEditor-호환 빈 단락 명시 삽입)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -30,7 +30,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.18 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.20 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -439,19 +439,29 @@
       doc.execCommand("delete", false);
 
       const lines = body.split(/\n+/).map((l) => l.trim()).filter((l) => l);
+
+      // v1.2.20: 단락 사이 빈 줄 보존 — 라인별 insertText 후, 단락 사이엔 NBSP가 든
+      // 빈 단락을 insertHTML로 명시 삽입. v1.2.18의 단순 공백은 SmartEditor trim에서 사라짐.
+      const isSE = !!editable.closest(".se-content");
+      const emptyParaHtml = isSE
+        ? '<p class="se-text-paragraph se-text-paragraph-align-"><span class="se-ff-nanumgothic se-fs15">&nbsp;</span></p>'
+        : '<p>&nbsp;</p>';
+
       for (let i = 0; i < lines.length; i++) {
         if (i > 0) {
-          // 단락 사이 빈 줄: 새 단락 → nbsp 삽입(빈 단락이 SmartEditor·일부 contenteditable에서
-          // collapse되어 안 보이는 문제 회피) → 다시 새 단락
           doc.execCommand("insertParagraph", false);
-          doc.execCommand("insertText", false, " ");
-          doc.execCommand("insertParagraph", false);
+          doc.execCommand("insertHTML", false, emptyParaHtml);
         }
         doc.execCommand("insertText", false, lines[i]);
       }
 
       // React state 갱신 보장 (insertText가 input 이벤트를 자체 발화하지만 한 번 더)
       editable.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
+
+      // 디버그: 결과 단락 수 로깅 (v1.2.20+ — 단락 보존 여부 빠른 진단)
+      const htmlAfter = (editable.innerHTML || "");
+      const pCount = (htmlAfter.match(/<p[\s>]/gi) || []).length;
+      console.log(`[NCAFE cafe-write] body filled — lines=${lines.length}, <p> count in DOM=${pCount}`);
 
       // 선택 해제 (잔여 selection 클리어)
       setTimeout(() => clearSelection(win), 50);
