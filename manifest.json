@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NCAFE Tracker",
-  "version": "1.2.21",
+  "version": "1.2.22",
   "description": "네이버 카페 글 발행/통계/가입 상태 추적 + 자동 입력 (페르소나 검증)",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [

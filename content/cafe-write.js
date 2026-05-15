@@ -1,4 +1,4 @@
-// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.21 — 글쓰기 버튼 찾기 강화: ✏️ VS16/zero-width 정규화 + aria-label/title 매칭 추가)
+// NCAFE Tracker - 자동 입력 + 페르소나 검증 (v1.2.22 — 단락 보존 다중 전략: \n\n insertText → NBSP insertParagraph → insertHTML 순서 자동 시도 + 진단 로그)
 //
 // 흐름:
 //   1) NCAFE: postMessage 'NCAFE_AUTO_FILL' 수신 → chrome.storage.local 저장
@@ -30,7 +30,7 @@
   if (window.__NCAFE_CAFE_WRITE_LOADED__) return;
   window.__NCAFE_CAFE_WRITE_LOADED__ = true;
   const isTop = window.self === window.top;
-  console.log("[NCAFE cafe-write] v1.2.21 loaded on", location.hostname, "top=" + isTop);
+  console.log("[NCAFE cafe-write] v1.2.22 loaded on", location.hostname, "top=" + isTop);
 
   // 확장 reload 후 옛 content script가 chrome API에 접근하면 발생하는 에러 무해화
   function isExtensionAlive() {
@@ -464,28 +464,79 @@
 
       const lines = body.split(/\n+/).map((l) => l.trim()).filter((l) => l);
 
-      // v1.2.20: 단락 사이 빈 줄 보존 — 라인별 insertText 후, 단락 사이엔 NBSP가 든
-      // 빈 단락을 insertHTML로 명시 삽입. v1.2.18의 단순 공백은 SmartEditor trim에서 사라짐.
+      // v1.2.22: 다중 전략 시퀀스. 각 시도 후 <p> 개수로 검증, 부족하면 다음 전략으로.
+      // SmartEditor 변형마다 동작 다름: 양주캐슬은 insertParagraph가 collapse,
+      // 일부는 \n\n이 곧바로 <br>로 변환. 가장 단순한 것부터 시도.
       const isSE = !!editable.closest(".se-content");
-      const emptyParaHtml = isSE
-        ? '<p class="se-text-paragraph se-text-paragraph-align-"><span class="se-ff-nanumgothic se-fs15">&nbsp;</span></p>'
-        : '<p>&nbsp;</p>';
 
-      for (let i = 0; i < lines.length; i++) {
-        if (i > 0) {
-          doc.execCommand("insertParagraph", false);
-          doc.execCommand("insertHTML", false, emptyParaHtml);
+      const reselect = () => {
+        const r = doc.createRange();
+        r.selectNodeContents(editable);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      };
+      const breakCount = () => {
+        const html = editable.innerHTML || "";
+        // <br>는 1개당 1break, <p> 사이 경계도 1break로 간주
+        const pCount = (html.match(/<p[\s>]/gi) || []).length;
+        const brCount = (html.match(/<br/gi) || []).length;
+        return Math.max(pCount - 1, 0) + brCount;
+      };
+      const needed = lines.length - 1;
+
+      let strategy = "none";
+
+      if (lines.length === 1) {
+        doc.execCommand("insertText", false, lines[0]);
+        strategy = "single-insertText";
+      } else {
+        // 전략 1: \n\n 한 번에 insertText — 일부 SmartEditor가 자동으로 <br>로 변환
+        doc.execCommand("insertText", false, lines.join("\n\n"));
+        strategy = "newline-insertText";
+
+        if (breakCount() < needed) {
+          // 전략 2: insertParagraph + NBSP + insertParagraph (v1.2.18+ 보강)
+          reselect();
+          doc.execCommand("delete", false);
+          for (let i = 0; i < lines.length; i++) {
+            if (i > 0) {
+              doc.execCommand("insertParagraph", false);
+              doc.execCommand("insertText", false, " "); // NBSP — trim 안 됨
+              doc.execCommand("insertParagraph", false);
+            }
+            doc.execCommand("insertText", false, lines[i]);
+          }
+          strategy = "insertParagraph-nbsp";
         }
-        doc.execCommand("insertText", false, lines[i]);
+
+        if (breakCount() < needed) {
+          // 전략 3: insertHTML로 SmartEditor-호환 빈 단락 직접 삽입 (v1.2.20 방식)
+          reselect();
+          doc.execCommand("delete", false);
+          const emptyParaHtml = isSE
+            ? '<p class="se-text-paragraph se-text-paragraph-align-"><span class="se-ff-nanumgothic se-fs15">&nbsp;</span></p>'
+            : '<p>&nbsp;</p>';
+          for (let i = 0; i < lines.length; i++) {
+            if (i > 0) {
+              doc.execCommand("insertParagraph", false);
+              doc.execCommand("insertHTML", false, emptyParaHtml);
+            }
+            doc.execCommand("insertText", false, lines[i]);
+          }
+          strategy = "insertHTML-empty-para";
+        }
       }
 
-      // React state 갱신 보장 (insertText가 input 이벤트를 자체 발화하지만 한 번 더)
+      // React state 갱신 보장
       editable.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
 
-      // 디버그: 결과 단락 수 로깅 (v1.2.20+ — 단락 보존 여부 빠른 진단)
-      const htmlAfter = (editable.innerHTML || "");
-      const pCount = (htmlAfter.match(/<p[\s>]/gi) || []).length;
-      console.log(`[NCAFE cafe-write] body filled — lines=${lines.length}, <p> count in DOM=${pCount}`);
+      // 진단 로그 — 어느 전략이 통했는지, 결과 break 수
+      const finalBreaks = breakCount();
+      const success = finalBreaks >= needed;
+      console.log(
+        `[NCAFE cafe-write] body filled (v1.2.22) — strategy="${strategy}", ` +
+        `lines=${lines.length}, breaks=${finalBreaks}/${needed} ${success ? "✓" : "✗"}`
+      );
 
       // 선택 해제 (잔여 selection 클리어)
       setTimeout(() => clearSelection(win), 50);
