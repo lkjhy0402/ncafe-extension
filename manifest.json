@@ -34,7 +34,11 @@
       "all_frames": false
     },
     {
-      "matches": ["https://cafe.naver.com/*"],
+      "matches": [
+        "https://cafe.naver.com/*/*",
+        "https://cafe.naver.com/ArticleRead.nhn*",
+        "https://cafe.naver.com/f-e/cafes/*/articles/*"
+      ],
       "js": ["lib/toast.js", "content/post-page.js"],
       "run_at": "document_idle",
       "all_frames": true
